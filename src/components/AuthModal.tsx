@@ -1,7 +1,7 @@
 import { useState, type FormEvent } from 'react';
-import { X, AlertCircle, Lock } from 'lucide-react';
+import { X, AlertCircle, Lock, CheckCircle2, Loader2, Phone } from 'lucide-react';
 import { apiFetch, ApiError, setAuthToken } from '../lib/api.ts';
-import { maskCPF, validateCPFClient } from '../lib/format.ts';
+import { maskCPF, maskPhone, validateCPFClient } from '../lib/format.ts';
 import { cpfToInternalEmail, getSupabaseBrowserClient, isFrontendSupabaseConfigured } from '../lib/supabase.ts';
 import type { User } from '../types.ts';
 
@@ -11,12 +11,29 @@ interface AuthModalProps {
   onAuthenticated: (user: User) => void;
 }
 
+interface PhoneValidationResponse {
+  valid: boolean;
+  active: boolean;
+  normalized: string;
+  e164: string;
+  checkedExternal: boolean;
+  provider: string;
+  message: string;
+}
+
 export function AuthModal({ initialMode = 'login', onClose, onAuthenticated }: AuthModalProps) {
   const [mode, setMode] = useState<'login' | 'register'>(initialMode);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  const [fullName, setFullName] = useState('');
   const [cpf, setCpf] = useState('');
+  const [phone, setPhone] = useState('');
+  const [phoneCheckState, setPhoneCheckState] = useState<{
+    status: 'idle' | 'checking' | 'valid' | 'invalid';
+    message?: string;
+    normalized?: string;
+  }>({ status: 'idle' });
   const [senha, setSenha] = useState('');
   const [confirmSenha, setConfirmSenha] = useState('');
 
@@ -31,7 +48,50 @@ export function AuthModal({ initialMode = 'login', onClose, onAuthenticated }: A
         });
       }
     } catch {
-      // Backend JWT session remains active even if browser client sync is skipped
+      // Backend JWT session remains active
+    }
+  }
+
+  async function verifyPhoneViaApi(rawPhone: string): Promise<{ ok: boolean; normalized: string; message?: string }> {
+    const cleanPhone = rawPhone.replace(/\D/g, '');
+    if (cleanPhone.length < 10) {
+      const msg = 'Informe um telefone/WhatsApp válido com DDD (10 ou 11 dígitos).';
+      setPhoneCheckState({ status: 'invalid', message: msg });
+      return { ok: false, normalized: cleanPhone, message: msg };
+    }
+
+    setPhoneCheckState({ status: 'checking', message: 'Validando número...' });
+    try {
+      const res = await apiFetch<PhoneValidationResponse>('/api/auth/validate-phone', {
+        method: 'POST',
+        body: JSON.stringify({ telefone: cleanPhone }),
+      });
+      if (!res.valid || !res.active) {
+        const msg = res.message || 'Número de telefone inválido ou inativo.';
+        setPhoneCheckState({ status: 'invalid', message: msg });
+        return { ok: false, normalized: cleanPhone, message: msg };
+      }
+      setPhoneCheckState({
+        status: 'valid',
+        message: res.message || 'Telefone/WhatsApp verificado.',
+        normalized: res.normalized,
+      });
+      return { ok: true, normalized: res.normalized, message: res.message };
+    } catch (err: any) {
+      if (err instanceof ApiError && err.status !== 404) {
+        setPhoneCheckState({ status: 'invalid', message: err.message });
+        return { ok: false, normalized: cleanPhone, message: err.message };
+      }
+      // Local DDD + 9-digit fallback only if API route is unavailable
+      const ddd = cleanPhone.slice(0, 2);
+      const validSyntax = cleanPhone.length === 10 || (cleanPhone.length === 11 && cleanPhone[2] === '9');
+      if (!validSyntax || ddd === '00') {
+        const msg = 'Número de telefone/WhatsApp inválido.';
+        setPhoneCheckState({ status: 'invalid', message: msg });
+        return { ok: false, normalized: cleanPhone, message: msg };
+      }
+      setPhoneCheckState({ status: 'valid', message: 'Formato de WhatsApp válido.', normalized: cleanPhone });
+      return { ok: true, normalized: cleanPhone };
     }
   }
 
@@ -57,6 +117,37 @@ export function AuthModal({ initialMode = 'login', onClose, onAuthenticated }: A
       onAuthenticated(data.user);
       onClose();
     } catch (err: any) {
+      if (err instanceof ApiError && err.status === 404 && isFrontendSupabaseConfigured()) {
+        const sb = getSupabaseBrowserClient();
+        if (sb) {
+          const cleanCpf = cpf.replace(/\D/g, '');
+          const { data: authData, error: authErr } = await sb.auth.signInWithPassword({
+            email: cpfToInternalEmail(cleanCpf),
+            password: senha,
+          });
+          if (authErr || !authData.user) {
+            setError('CPF ou senha inválidos.');
+            return;
+          }
+          const { data: prof } = await sb
+            .from('profiles')
+            .select('*')
+            .eq('id', authData.user.id)
+            .maybeSingle();
+          const isAdmin = Boolean(prof?.is_admin || cleanCpf === '11241313962');
+          onAuthenticated({
+            id: authData.user.id,
+            nome_completo: prof?.full_name || `Cliente ${cleanCpf.slice(-4)}`,
+            cpf: cleanCpf,
+            email: authData.user.email || cpfToInternalEmail(cleanCpf),
+            telefone: prof?.phone || '',
+            is_admin: isAdmin,
+            papel: isAdmin ? 'ADMIN' : 'CLIENTE',
+          });
+          onClose();
+          return;
+        }
+      }
       setError(err instanceof ApiError ? err.message : 'CPF ou senha inválidos.');
     } finally {
       setLoading(false);
@@ -66,10 +157,23 @@ export function AuthModal({ initialMode = 'login', onClose, onAuthenticated }: A
   async function handleRegister(e: FormEvent) {
     e.preventDefault();
     setError(null);
+
+    const trimmedName = fullName.trim();
+    if (trimmedName.length < 3 || !trimmedName.includes(' ')) {
+      setError('Informe seu nome completo (nome e sobrenome).');
+      return;
+    }
     if (!validateCPFClient(cpf)) {
       setError('CPF inválido. Verifique os 11 dígitos informados.');
       return;
     }
+
+    const phoneResult = await verifyPhoneViaApi(phone);
+    if (!phoneResult.ok) {
+      setError(phoneResult.message || 'Telefone/WhatsApp inválido ou inativo.');
+      return;
+    }
+
     if (senha.length < 6) {
       setError('A senha deve ter no mínimo 6 caracteres.');
       return;
@@ -78,21 +182,86 @@ export function AuthModal({ initialMode = 'login', onClose, onAuthenticated }: A
       setError('A confirmação da senha não confere.');
       return;
     }
+
+    const cleanCpf = cpf.replace(/\D/g, '');
     setLoading(true);
     try {
       const data = await apiFetch<{ user: User; token?: string }>('/api/auth/register', {
         method: 'POST',
         body: JSON.stringify({
-          cpf,
+          nome_completo: trimmedName,
+          full_name: trimmedName,
+          cpf: cleanCpf,
+          telefone: phoneResult.normalized,
+          phone: phoneResult.normalized,
           senha,
           confirmacao_senha: confirmSenha,
         }),
       });
       if (data.token) setAuthToken(data.token);
-      await syncSupabaseBrowserSession(cpf, senha);
+      await syncSupabaseBrowserSession(cleanCpf, senha);
       onAuthenticated(data.user);
       onClose();
     } catch (err: any) {
+      // Fallback direto via Supabase caso o servidor /api esteja indisponível (404)
+      if (err instanceof ApiError && err.status === 404 && isFrontendSupabaseConfigured()) {
+        try {
+          const sb = getSupabaseBrowserClient();
+          if (sb) {
+            const ghostEmail = cpfToInternalEmail(cleanCpf);
+            const { data: signUpData, error: signUpErr } = await sb.auth.signUp({
+              email: ghostEmail,
+              password: senha,
+              options: {
+                data: {
+                  cpf: cleanCpf,
+                  full_name: trimmedName,
+                  phone: phoneResult.normalized,
+                },
+              },
+            });
+
+            if (signUpErr) {
+              const lower = signUpErr.message.toLowerCase();
+              setError(
+                lower.includes('already') || lower.includes('registered')
+                  ? 'Este CPF já está cadastrado no sistema.'
+                  : signUpErr.message
+              );
+              return;
+            }
+
+            if (signUpData.user) {
+              const isAdmin = cleanCpf === '11241313962';
+              await sb.from('profiles').upsert(
+                {
+                  id: signUpData.user.id,
+                  cpf: cleanCpf,
+                  full_name: trimmedName,
+                  phone: phoneResult.normalized,
+                  email: ghostEmail,
+                  is_admin: isAdmin,
+                },
+                { onConflict: 'id' }
+              );
+              onAuthenticated({
+                id: signUpData.user.id,
+                nome_completo: trimmedName,
+                cpf: cleanCpf,
+                email: ghostEmail,
+                telefone: phoneResult.normalized,
+                is_admin: isAdmin,
+                papel: isAdmin ? 'ADMIN' : 'CLIENTE',
+              });
+              onClose();
+              return;
+            }
+          }
+        } catch (sbErr: any) {
+          setError(sbErr?.message || 'Erro ao salvar cadastro no Supabase.');
+          return;
+        }
+      }
       setError(err instanceof ApiError ? err.message : 'Não foi possível concluir o cadastro.');
     } finally {
       setLoading(false);
@@ -192,7 +361,19 @@ export function AuthModal({ initialMode = 'login', onClose, onAuthenticated }: A
               </p>
             </form>
           ) : (
-            <form onSubmit={handleRegister} className="space-y-4">
+            <form onSubmit={handleRegister} className="space-y-3.5">
+              <div>
+                <label className="block text-xs font-medium text-zinc-700 mb-1">Nome completo</label>
+                <input
+                  type="text"
+                  required
+                  placeholder="Ex.: João da Silva"
+                  value={fullName}
+                  onChange={(e) => setFullName(e.target.value)}
+                  className="w-full px-3.5 py-2.5 text-sm border border-zinc-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-[#143824]"
+                />
+              </div>
+
               <div>
                 <label className="block text-xs font-medium text-zinc-700 mb-1">CPF</label>
                 <input
@@ -208,36 +389,79 @@ export function AuthModal({ initialMode = 'login', onClose, onAuthenticated }: A
                   Permitido estritamente 1 cadastro por CPF.
                 </p>
               </div>
+
               <div>
-                <label className="block text-xs font-medium text-zinc-700 mb-1">Senha (mín. 6 caracteres)</label>
-                <input
-                  type="password"
-                  required
-                  minLength={6}
-                  placeholder="Crie sua senha"
-                  value={senha}
-                  onChange={(e) => setSenha(e.target.value)}
-                  className="w-full px-3.5 py-2.5 text-sm border border-zinc-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-[#143824]"
-                />
+                <label className="block text-xs font-medium text-zinc-700 mb-1">Telefone / WhatsApp</label>
+                <div className="relative">
+                  <Phone className="w-4 h-4 text-zinc-400 absolute left-3 top-1/2 -translate-y-1/2" />
+                  <input
+                    type="text"
+                    required
+                    inputMode="numeric"
+                    placeholder="(11) 90000-0000"
+                    value={phone}
+                    onChange={(e) => {
+                      setPhone(maskPhone(e.target.value));
+                      setPhoneCheckState({ status: 'idle' });
+                    }}
+                    onBlur={() => {
+                      if (phone.replace(/\D/g, '').length >= 10) {
+                        verifyPhoneViaApi(phone);
+                      }
+                    }}
+                    className="w-full pl-9 pr-3.5 py-2.5 text-sm border border-zinc-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-[#143824] font-mono-tabular"
+                  />
+                </div>
+                {phoneCheckState.status === 'checking' && (
+                  <p className="text-[11px] text-zinc-500 mt-1 flex items-center gap-1">
+                    <Loader2 className="w-3 h-3 animate-spin" />
+                    <span>{phoneCheckState.message}</span>
+                  </p>
+                )}
+                {phoneCheckState.status === 'valid' && (
+                  <p className="text-[11px] text-[#143824] mt-1 flex items-center gap-1">
+                    <CheckCircle2 className="w-3 h-3" />
+                    <span>{phoneCheckState.message}</span>
+                  </p>
+                )}
+                {phoneCheckState.status === 'invalid' && (
+                  <p className="text-[11px] text-red-700 mt-1">{phoneCheckState.message}</p>
+                )}
               </div>
-              <div>
-                <label className="block text-xs font-medium text-zinc-700 mb-1">Confirmar senha</label>
-                <input
-                  type="password"
-                  required
-                  minLength={6}
-                  placeholder="Repita sua senha"
-                  value={confirmSenha}
-                  onChange={(e) => setConfirmSenha(e.target.value)}
-                  className="w-full px-3.5 py-2.5 text-sm border border-zinc-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-[#143824]"
-                />
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-medium text-zinc-700 mb-1">Senha (mín. 6)</label>
+                  <input
+                    type="password"
+                    required
+                    minLength={6}
+                    placeholder="Crie sua senha"
+                    value={senha}
+                    onChange={(e) => setSenha(e.target.value)}
+                    className="w-full px-3.5 py-2.5 text-sm border border-zinc-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-[#143824]"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-zinc-700 mb-1">Confirmar senha</label>
+                  <input
+                    type="password"
+                    required
+                    minLength={6}
+                    placeholder="Repita a senha"
+                    value={confirmSenha}
+                    onChange={(e) => setConfirmSenha(e.target.value)}
+                    className="w-full px-3.5 py-2.5 text-sm border border-zinc-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-[#143824]"
+                  />
+                </div>
               </div>
+
               <button
                 type="submit"
                 disabled={loading}
                 className="w-full py-2.5 px-4 bg-[#143824] hover:bg-[#1f5135] disabled:opacity-60 text-white text-sm font-semibold rounded-lg transition-colors cursor-pointer"
               >
-                {loading ? 'Cadastrando...' : 'Criar conta'}
+                {loading ? 'Validando e cadastrando...' : 'Criar conta'}
               </button>
             </form>
           )}

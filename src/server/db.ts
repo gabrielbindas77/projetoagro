@@ -5,12 +5,13 @@ import fs from 'fs';
 import path from 'path';
 import { cleanDigits, normalizeText } from './utils.ts';
 
-const dataDir = path.resolve(process.cwd(), 'data');
+const baseWritableDir = process.env.VERCEL ? '/tmp/agro-marconato' : process.cwd();
+const dataDir = path.resolve(baseWritableDir, 'data');
 if (!fs.existsSync(dataDir)) {
   fs.mkdirSync(dataDir, { recursive: true });
 }
 
-export const uploadsDir = path.resolve(process.cwd(), 'uploads', 'produtos');
+export const uploadsDir = path.resolve(baseWritableDir, 'uploads', 'produtos');
 if (!fs.existsSync(uploadsDir)) {
   fs.mkdirSync(uploadsDir, { recursive: true });
 }

@@ -69,6 +69,7 @@ import {
   normalizeText,
   validatePasswordStrength,
   verifyMercadoPagoWebhookSignature,
+  verifyPhoneNumberWithApi,
 } from './utils.ts';
 import { broadcastChatMessage, broadcastOrderUpdate } from './ws.ts';
 
@@ -188,34 +189,67 @@ apiRouter.get('/cep/:cep', optionalAuth, async (req, res) => {
 // UNIFIED AUTHENTICATION (Exclusively CPF + Password, 1 registration per CPF)
 // ==============================================================================
 
+apiRouter.post('/auth/validate-phone', async (req, res) => {
+  try {
+    const rawPhone = String(req.body?.telefone || req.body?.phone || '');
+    const result = await verifyPhoneNumberWithApi(rawPhone);
+    if (!result.valid || !result.active) {
+      return res.status(400).json({
+        valid: false,
+        active: false,
+        error: result.message,
+      });
+    }
+    return res.json(result);
+  } catch (err: any) {
+    return res.status(500).json({
+      valid: false,
+      active: false,
+      error: err?.message || 'Erro ao validar telefone.',
+    });
+  }
+});
+
 apiRouter.post('/auth/register', async (req, res) => {
   try {
-    const {
-      nome_completo,
-      cpf: rawCpf,
-      telefone: rawTelefone,
-      senha,
-      confirmacao_senha,
-    } = req.body || {};
+    const body = req.body || {};
+    const fullName = String(body.nome_completo ?? body.full_name ?? '').trim();
+    const rawCpf = body.cpf;
+    const rawTelefone = String(body.telefone ?? body.phone ?? '').trim();
+    const senha = String(body.senha ?? body.password ?? '');
+    const confirmacao = body.confirmacao_senha ?? body.confirm_password;
+
+    if (fullName.length < 3 || !fullName.includes(' ')) {
+      return res.status(400).json({
+        error: 'Informe seu nome completo (nome e sobrenome).',
+      });
+    }
 
     const cpf = cleanDigits(String(rawCpf || ''));
     if (!isValidCPF(cpf)) {
       return res.status(400).json({ error: 'CPF inválido. Verifique os 11 dígitos informados.' });
     }
 
-    const pwCheck = validatePasswordStrength(String(senha || ''));
+    const phoneCheck = await verifyPhoneNumberWithApi(rawTelefone);
+    if (!phoneCheck.valid || !phoneCheck.active) {
+      return res.status(400).json({
+        error: phoneCheck.message,
+      });
+    }
+
+    const pwCheck = validatePasswordStrength(senha);
     if (!pwCheck.valid) {
       return res.status(400).json({ error: pwCheck.errors[0], details: pwCheck.errors });
     }
-    if (confirmacao_senha !== undefined && senha !== confirmacao_senha) {
+    if (confirmacao !== undefined && senha !== confirmacao) {
       return res.status(400).json({ error: 'A confirmação da senha não confere.' });
     }
 
     const created = await registerUserByCpfPassword({
       cpf,
-      senha: String(senha),
-      nome_completo: nome_completo ? String(nome_completo).trim() : undefined,
-      telefone: rawTelefone ? String(rawTelefone) : undefined,
+      senha,
+      nome_completo: fullName,
+      telefone: phoneCheck.normalized,
     });
 
     const token = signSessionToken({

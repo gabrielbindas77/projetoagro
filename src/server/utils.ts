@@ -55,16 +55,183 @@ const VALID_BR_DDDS = new Set([
   '91','92','93','94','95','96','97','98','99',
 ]);
 
-export function isValidBrazilPhone(rawPhone: string): boolean {
+export function normalizeBrazilPhone(rawPhone: string): string {
   let digits = cleanDigits(rawPhone);
   if (digits.startsWith('55') && (digits.length === 12 || digits.length === 13)) {
     digits = digits.slice(2);
   }
+  return digits;
+}
+
+export function isValidBrazilPhone(rawPhone: string): boolean {
+  const digits = normalizeBrazilPhone(rawPhone);
   if (digits.length !== 10 && digits.length !== 11) return false;
   const ddd = digits.slice(0, 2);
   if (!VALID_BR_DDDS.has(ddd)) return false;
-  if (digits.length === 11 && digits.charAt(2) !== '9') return false;
+  const local = digits.slice(2);
+  if (/^(\d)\1+$/.test(local)) return false;
+  if (digits.length === 11) {
+    if (digits.charAt(2) !== '9') return false;
+    if (/^90+$/.test(local) || local === '912345678') return false;
+  }
   return true;
+}
+
+export async function verifyPhoneNumberWithApi(rawPhone: string): Promise<{
+  valid: boolean;
+  active: boolean;
+  normalized: string;
+  e164: string;
+  checkedExternal: boolean;
+  provider: string;
+  message: string;
+}> {
+  const digits = normalizeBrazilPhone(rawPhone);
+  const e164 = `+55${digits}`;
+
+  if (!isValidBrazilPhone(digits)) {
+    return {
+      valid: false,
+      active: false,
+      normalized: digits,
+      e164,
+      checkedExternal: false,
+      provider: 'anatel_ddd',
+      message: 'Número de telefone/WhatsApp inválido. Informe DDD válido + número ativo com 9 dígitos para celular.',
+    };
+  }
+
+  // 1. WhatsApp Business / Evolution / Z-API check if configured
+  const waCheckUrl = process.env.WHATSAPP_CHECK_API_URL;
+  const waCheckToken = process.env.WHATSAPP_CHECK_API_TOKEN;
+  if (waCheckUrl) {
+    try {
+      const resp = await fetch(waCheckUrl, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(waCheckToken ? { Authorization: `Bearer ${waCheckToken}`, 'Client-Token': waCheckToken } : {}),
+        },
+        body: JSON.stringify({ phone: `55${digits}`, numbers: [`55${digits}`] }),
+      });
+      if (resp.ok) {
+        const data: any = await resp.json().catch(() => ({}));
+        const exists = Boolean(
+          data?.exists ??
+            data?.isRegistered ??
+            data?.onWhatsApp ??
+            (Array.isArray(data) ? data[0]?.exists : undefined)
+        );
+        return {
+          valid: exists,
+          active: exists,
+          normalized: digits,
+          e164,
+          checkedExternal: true,
+          provider: 'whatsapp_api',
+          message: exists
+            ? 'WhatsApp ativo e confirmado.'
+            : 'Este número não possui WhatsApp ativo. Verifique o número informado.',
+        };
+      }
+    } catch {
+      // fall through to carrier lookup if configured
+    }
+  }
+
+  // 2. Twilio Lookup v2 if configured
+  const twilioSid = process.env.TWILIO_ACCOUNT_SID;
+  const twilioToken = process.env.TWILIO_AUTH_TOKEN;
+  if (twilioSid && twilioToken) {
+    try {
+      const auth = Buffer.from(`${twilioSid}:${twilioToken}`).toString('base64');
+      const resp = await fetch(
+        `https://lookups.twilio.com/v2/PhoneNumbers/${encodeURIComponent(e164)}`,
+        {
+          headers: { Authorization: `Basic ${auth}` },
+        }
+      );
+      if (resp.ok) {
+        const data: any = await resp.json().catch(() => ({}));
+        const ok = Boolean(data?.valid);
+        return {
+          valid: ok,
+          active: ok,
+          normalized: digits,
+          e164,
+          checkedExternal: true,
+          provider: 'twilio_lookup',
+          message: ok
+            ? 'Telefone ativo confirmado pela operadora.'
+            : 'O número de telefone informado não foi reconhecido como ativo.',
+        };
+      }
+    } catch {
+      // fall through
+    }
+  }
+
+  // 3. AbstractAPI Phone Validation if configured
+  const abstractKey = process.env.ABSTRACT_PHONE_API_KEY;
+  if (abstractKey) {
+    try {
+      const resp = await fetch(
+        `https://phonevalidation.abstractapi.com/v1/?api_key=${encodeURIComponent(abstractKey)}&phone=55${digits}`
+      );
+      if (resp.ok) {
+        const data: any = await resp.json().catch(() => ({}));
+        const ok = Boolean(data?.valid);
+        return {
+          valid: ok,
+          active: ok,
+          normalized: digits,
+          e164,
+          checkedExternal: true,
+          provider: 'abstract_phone',
+          message: ok
+            ? 'Telefone validado e ativo.'
+            : 'Número de telefone não encontrado ou inativo.',
+        };
+      }
+    } catch {
+      // fall through
+    }
+  }
+
+  // 4. Numverify if configured
+  const numverifyKey = process.env.NUMVERIFY_API_KEY;
+  if (numverifyKey) {
+    try {
+      const resp = await fetch(
+        `https://apilayer.net/api/validate?access_key=${encodeURIComponent(numverifyKey)}&number=55${digits}&format=1`
+      );
+      if (resp.ok) {
+        const data: any = await resp.json().catch(() => ({}));
+        const ok = Boolean(data?.valid);
+        return {
+          valid: ok,
+          active: ok,
+          normalized: digits,
+          e164,
+          checkedExternal: true,
+          provider: 'numverify',
+          message: ok ? 'Telefone ativo confirmado.' : 'Número de telefone inválido ou inativo.',
+        };
+      }
+    } catch {
+      // fall through
+    }
+  }
+
+  return {
+    valid: true,
+    active: true,
+    normalized: digits,
+    e164,
+    checkedExternal: false,
+    provider: 'anatel_ddd',
+    message: 'DDD e formato de WhatsApp/telefone verificados.',
+  };
 }
 
 export function isValidEmail(email: string): boolean {

@@ -1,3 +1,4 @@
+import { useEffect, useState } from 'react';
 import { X, Trash2, ShoppingBag, ArrowRight } from 'lucide-react';
 import { formatBRL, formatWeight } from '../lib/format.ts';
 import type { CartItem, CartState } from '../types.ts';
@@ -11,6 +12,50 @@ interface CartDrawerProps {
   onCheckout: () => void;
 }
 
+function KgQuantityInput({
+  item,
+  onCommit,
+}: {
+  item: CartItem;
+  onCommit: (nextQty: number) => Promise<void>;
+}) {
+  const [draft, setDraft] = useState(String(item.quantidade));
+
+  useEffect(() => {
+    setDraft(String(item.quantidade));
+  }, [item.quantidade]);
+
+  async function commitValue() {
+    const normalized = Number(draft.replace(',', '.'));
+    if (Number.isFinite(normalized) && normalized > 0 && normalized !== item.quantidade) {
+      await onCommit(Number(normalized.toFixed(3)));
+    } else {
+      setDraft(String(item.quantidade));
+    }
+  }
+
+  return (
+    <div className="flex items-center gap-1.5">
+      <input
+        type="number"
+        step="0.05"
+        min="0.05"
+        value={draft}
+        onChange={(e) => setDraft(e.target.value)}
+        onBlur={commitValue}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter') {
+            e.preventDefault();
+            commitValue();
+          }
+        }}
+        className="w-20 px-2 py-1 text-xs border border-zinc-300 rounded font-mono-tabular focus:outline-none focus:ring-1 focus:ring-[#143824]"
+      />
+      <span className="text-xs text-zinc-500">kg</span>
+    </div>
+  );
+}
+
 export function CartDrawer({
   open,
   cart,
@@ -20,6 +65,9 @@ export function CartDrawer({
   onCheckout,
 }: CartDrawerProps) {
   if (!open) return null;
+
+  const shippingCentavos = cart.itens.length > 0 ? 499 : 0;
+  const totalCentavos = cart.subtotal_centavos + shippingCentavos;
 
   return (
     <div className="fixed inset-0 z-50 flex justify-end bg-black/45">
@@ -108,22 +156,10 @@ export function CartDrawer({
                           </button>
                         </div>
                       ) : (
-                        <div className="flex items-center gap-1.5">
-                          <input
-                            type="number"
-                            step="0.1"
-                            min="0.1"
-                            defaultValue={item.quantidade}
-                            onBlur={(e) => {
-                              const val = Number(e.target.value);
-                              if (val > 0 && val !== item.quantidade) {
-                                onUpdateItem(item, { quantidade: val });
-                              }
-                            }}
-                            className="w-20 px-2 py-1 text-xs border border-zinc-300 rounded font-mono-tabular"
-                          />
-                          <span className="text-xs text-zinc-500">kg</span>
-                        </div>
+                        <KgQuantityInput
+                          item={item}
+                          onCommit={(nextQty) => onUpdateItem(item, { quantidade: nextQty })}
+                        />
                       )}
 
                       <span className="text-sm font-bold text-zinc-900 font-mono-tabular">
@@ -144,12 +180,12 @@ export function CartDrawer({
               <span className="font-mono-tabular">{formatBRL(cart.subtotal_centavos)}</span>
             </div>
             <div className="flex items-center justify-between text-sm text-zinc-600">
-              <span>Frete fixo</span>
-              <span className="font-mono-tabular">{formatBRL(cart.frete_centavos)}</span>
+              <span>Frete fixo obrigatório</span>
+              <span className="font-mono-tabular">{formatBRL(shippingCentavos)}</span>
             </div>
             <div className="pt-2 border-t border-zinc-200 flex items-center justify-between text-base font-bold text-zinc-900">
               <span>Total</span>
-              <span className="font-mono-tabular text-[#143824]">{formatBRL(cart.total_centavos)}</span>
+              <span className="font-mono-tabular text-[#143824]">{formatBRL(totalCentavos)}</span>
             </div>
             <button
               type="button"

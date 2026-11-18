@@ -2,6 +2,7 @@ import { useEffect, useState, type FormEvent } from 'react';
 import { X, MapPin, CreditCard, QrCode, Banknote, Copy, Check, AlertCircle, RefreshCw, User as UserIcon } from 'lucide-react';
 import { apiFetch } from '../lib/api.ts';
 import { formatBRL, maskCEP, maskPhone, FINANCE_STATUS_LABEL } from '../lib/format.ts';
+import { getSupabaseBrowserClient, isFrontendSupabaseConfigured } from '../lib/supabase.ts';
 import type { Address, CartState, Order, PaymentRecord, PublicConfig, User } from '../types.ts';
 
 interface CheckoutModalProps {
@@ -99,6 +100,35 @@ export function CheckoutModal({ cart, config, user, onClose, onOrderCreated }: C
       .catch(() => {});
   }, [cardNumber, formaPagamento, cart.total_centavos, config.mercado_pago_configurado]);
 
+  useEffect(() => {
+    if (!createdOrder?.id || createdOrder.situacao_financeira === 'PAGO') return;
+    if (!isFrontendSupabaseConfigured()) return;
+    const sb = getSupabaseBrowserClient();
+    if (!sb) return;
+
+    const channel = sb
+      .channel(`checkout-order-${createdOrder.id}`)
+      .on(
+        'postgres_changes',
+        { event: 'UPDATE', schema: 'public', table: 'orders', filter: `id=eq.${createdOrder.id}` },
+        async () => {
+          try {
+            const refreshed = await apiFetch<Order>(`/api/pedidos/${createdOrder.id}`);
+            setCreatedOrder(refreshed);
+            if (refreshed.pagamentos?.[0]) setCreatedPayment(refreshed.pagamentos[0]);
+            onOrderCreated(refreshed);
+          } catch {
+            // ignore transient polling/realtime error
+          }
+        }
+      )
+      .subscribe();
+
+    return () => {
+      sb.removeChannel(channel);
+    };
+  }, [createdOrder?.id, createdOrder?.situacao_financeira, onOrderCreated]);
+
   async function lookupCEP(rawCep: string) {
     const clean = rawCep.replace(/\D/g, '');
     setAddress((prev) => ({ ...prev, cep: maskCEP(rawCep) }));
@@ -176,7 +206,7 @@ export function CheckoutModal({ cart, config, user, onClose, onOrderCreated }: C
         pedido: Order;
         pagamento: PaymentRecord;
         paymentNotice: string | null;
-      }>('/api/pedidos', {
+      }>('/api/checkout', {
         method: 'POST',
         body: JSON.stringify({
           endereco: {
