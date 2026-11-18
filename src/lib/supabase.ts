@@ -1,7 +1,5 @@
 import { createClient, type SupabaseClient } from '@supabase/supabase-js';
 
-const env = (import.meta as any).env || {};
-
 function cleanEnvValue(raw?: string): string {
   if (!raw) return '';
   let val = String(raw).trim();
@@ -33,7 +31,7 @@ function extractProjectRef(url: string): string {
       return host.split('.')[0] || '';
     }
   } catch {
-    // ignore
+    // ignore invalid URL
   }
   return '';
 }
@@ -52,43 +50,53 @@ function decodeJwtPayload(token: string): Record<string, any> | null {
   }
 }
 
-function isValidBrowserPublicKey(key: string, projectRef: string): boolean {
+function isValidClientPublicKey(key: string, projectRef: string): boolean {
   if (!key) return false;
+  // Bloqueia qualquer chave privilegiada caso tenha sido colada por engano em variável pública
   if (key.startsWith('sb_secret_')) return false;
   if (key.startsWith('sb_publishable_')) return key.length > 20;
   const jwt = decodeJwtPayload(key);
   if (jwt) {
-    if (jwt.role === 'service_role') return false;
+    if (jwt.role && jwt.role !== 'anon') return false;
     if (projectRef && jwt.ref && String(jwt.ref) !== projectRef) return false;
     return true;
   }
   return key.length >= 20;
 }
 
+const procEnv = typeof process !== 'undefined' && process?.env ? process.env : undefined;
+
 const SUPABASE_URL: string = (
-  cleanEnvValue(env.VITE_SUPABASE_URL) || cleanEnvValue(env.NEXT_PUBLIC_SUPABASE_URL)
+  cleanEnvValue(import.meta.env.NEXT_PUBLIC_SUPABASE_URL) ||
+  cleanEnvValue(import.meta.env.VITE_SUPABASE_URL) ||
+  cleanEnvValue(procEnv?.NEXT_PUBLIC_SUPABASE_URL) ||
+  cleanEnvValue(procEnv?.VITE_SUPABASE_URL)
 ).replace(/\/+$/, '');
 
 const PROJECT_REF = extractProjectRef(SUPABASE_URL);
 
-const SUPABASE_ANON_KEY: string =
+const SUPABASE_PUBLIC_KEY: string =
   [
-    cleanEnvValue(env.VITE_SUPABASE_PUBLISHABLE_KEY),
-    cleanEnvValue(env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY),
-    cleanEnvValue(env.VITE_SUPABASE_ANON_KEY),
-    cleanEnvValue(env.NEXT_PUBLIC_SUPABASE_ANON_KEY),
-  ].find((cand) => isValidBrowserPublicKey(cand, PROJECT_REF)) || '';
+    cleanEnvValue(import.meta.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY),
+    cleanEnvValue(import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY),
+    cleanEnvValue(import.meta.env.VITE_SUPABASE_ANON_KEY),
+    cleanEnvValue(import.meta.env.NEXT_PUBLIC_SUPABASE_ANON_KEY),
+    cleanEnvValue(procEnv?.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY),
+    cleanEnvValue(procEnv?.VITE_SUPABASE_PUBLISHABLE_KEY),
+    cleanEnvValue(procEnv?.VITE_SUPABASE_ANON_KEY),
+    cleanEnvValue(procEnv?.NEXT_PUBLIC_SUPABASE_ANON_KEY),
+  ].find((cand) => isValidClientPublicKey(cand, PROJECT_REF)) || '';
 
 let browserClient: SupabaseClient | null = null;
 
 export function isFrontendSupabaseConfigured(): boolean {
-  return Boolean(SUPABASE_URL && SUPABASE_ANON_KEY && SUPABASE_URL.startsWith('https://'));
+  return Boolean(SUPABASE_URL && SUPABASE_PUBLIC_KEY && SUPABASE_URL.startsWith('https://'));
 }
 
 export function getSupabaseBrowserClient(): SupabaseClient | null {
   if (!isFrontendSupabaseConfigured()) return null;
   if (!browserClient) {
-    browserClient = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
+    browserClient = createClient(SUPABASE_URL, SUPABASE_PUBLIC_KEY, {
       auth: {
         persistSession: true,
         autoRefreshToken: true,
@@ -97,6 +105,8 @@ export function getSupabaseBrowserClient(): SupabaseClient | null {
   }
   return browserClient;
 }
+
+export const supabase: SupabaseClient | null = getSupabaseBrowserClient();
 
 export function cpfToInternalEmail(rawCpf: string): string {
   const cpfLimpo = String(rawCpf || '').replace(/\D/g, '');
