@@ -1,0 +1,6 @@
+{
+  "name": "Agro Marconato Agropecuária",
+  "description": "Loja virtual oficial da Agro Marconato Agropecuária: rações, sementes, produtos veterinários, ferramentas e insumos agropecuários com compra por unidade, peso ou valor.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
