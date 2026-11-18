@@ -68,7 +68,12 @@ export function AuthModal({ initialMode = 'login', onClose, onAuthenticated }: A
             password: senha,
           });
           if (authErr || !authData.user) {
-            setError('CPF ou senha inválidos.');
+            const lower = (authErr?.message || '').toLowerCase();
+            if (lower.includes('invalid api key') || lower.includes('invalid jwt')) {
+              setError('Chave de API do Supabase inválida nas variáveis de ambiente.');
+            } else {
+              setError('CPF ou senha inválidos.');
+            }
             return;
           }
           const { data: prof } = await sb
@@ -145,7 +150,12 @@ export function AuthModal({ initialMode = 'login', onClose, onAuthenticated }: A
       onAuthenticated(data.user);
       onClose();
     } catch (err: any) {
-      if (err instanceof ApiError && (err.status === 404 || err.status >= 500) && isFrontendSupabaseConfigured()) {
+      const serverMsg = err instanceof ApiError ? err.message : '';
+      const canTryBrowserFallback =
+        isFrontendSupabaseConfigured() &&
+        (!(err instanceof ApiError) || err.status === 404 || (err.status >= 500 && !serverMsg.includes('Chave de API')));
+
+      if (canTryBrowserFallback) {
         try {
           const sb = getSupabaseBrowserClient();
           if (sb) {
@@ -164,6 +174,13 @@ export function AuthModal({ initialMode = 'login', onClose, onAuthenticated }: A
 
             if (signUpErr) {
               const lower = signUpErr.message.toLowerCase();
+              if (lower.includes('invalid api key') || lower.includes('invalid jwt')) {
+                setError(
+                  serverMsg ||
+                    'Chave de API do Supabase inválida. Verifique SUPABASE_URL, SUPABASE_SECRET_KEY e VITE_SUPABASE_PUBLISHABLE_KEY nas variáveis de ambiente.'
+                );
+                return;
+              }
               setError(
                 lower.includes('already') || lower.includes('registered')
                   ? 'Este CPF já está cadastrado no sistema.'
@@ -199,11 +216,11 @@ export function AuthModal({ initialMode = 'login', onClose, onAuthenticated }: A
             }
           }
         } catch (sbErr: any) {
-          setError(sbErr?.message || 'Erro ao salvar cadastro no Supabase.');
+          setError(serverMsg || sbErr?.message || 'Erro ao salvar cadastro no Supabase.');
           return;
         }
       }
-      setError(err instanceof ApiError ? err.message : 'Não foi possível concluir o cadastro.');
+      setError(serverMsg || 'Não foi possível concluir o cadastro.');
     } finally {
       setLoading(false);
     }

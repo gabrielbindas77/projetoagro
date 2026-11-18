@@ -22,17 +22,34 @@ export interface AuthRequest extends Request {
 const COOKIE_NAME = 'agro_marconato_session';
 
 function resolveJwtSecret(): string {
-  if (process.env.JWT_SECRET && process.env.JWT_SECRET.length >= 16) {
-    return process.env.JWT_SECRET;
+  const envSecret = String(process.env.JWT_SECRET || '').trim();
+  if (envSecret.length >= 16) {
+    return envSecret;
   }
-  const secretPath = path.resolve(process.cwd(), 'data', '.jwt_secret');
-  if (fs.existsSync(secretPath)) {
-    return fs.readFileSync(secretPath, 'utf8').trim();
+  if (process.env.VERCEL) {
+    const seed =
+      process.env.SUPABASE_SECRET_KEY ||
+      process.env.SUPABASE_SERVICE_ROLE_KEY ||
+      process.env.MERCADOPAGO_ACCESS_TOKEN ||
+      process.env.VERCEL_PROJECT_PRODUCTION_URL ||
+      'agro-marconato-vercel-fallback-seed';
+    return crypto.createHmac('sha256', 'agro-marconato-jwt').update(seed).digest('hex');
   }
-  const generated = crypto.randomBytes(48).toString('hex');
-  fs.mkdirSync(path.dirname(secretPath), { recursive: true });
-  fs.writeFileSync(secretPath, generated, { mode: 0o600 });
-  return generated;
+  try {
+    const secretPath = path.resolve(process.cwd(), 'data', '.jwt_secret');
+    if (fs.existsSync(secretPath)) {
+      return fs.readFileSync(secretPath, 'utf8').trim();
+    }
+    const generated = crypto.randomBytes(48).toString('hex');
+    fs.mkdirSync(path.dirname(secretPath), { recursive: true });
+    fs.writeFileSync(secretPath, generated, { mode: 0o600 });
+    return generated;
+  } catch {
+    return crypto
+      .createHmac('sha256', 'agro-marconato-jwt')
+      .update(process.env.SUPABASE_SECRET_KEY || process.env.SUPABASE_SERVICE_ROLE_KEY || 'local-fallback')
+      .digest('hex');
+  }
 }
 
 const JWT_SECRET = resolveJwtSecret();

@@ -6,11 +6,13 @@ import { db, getStoreConfig as getSqliteConfig, uploadsDir } from './db.ts';
 import {
   ADMIN_MASTER_CPF,
   cpfToAuthEmail,
-  createEphemeralSupabaseClient,
   ensureSupabaseAdminBootstrap,
   getSupabaseAdmin,
+  isInvalidApiKeyMessage,
   isSupabaseConfigured,
   resolveSupabaseUrl,
+  rotateSupabaseServiceKey,
+  signInSupabasePasswordWithFallback,
 } from './supabase.ts';
 import { cleanDigits, normalizeText } from './utils.ts';
 
@@ -189,33 +191,65 @@ export async function registerUserByCpfPassword(input: {
   const phone = cleanDigits(input.telefone || '');
   const isAdmin = cpf === ADMIN_MASTER_CPF;
 
-  const sb = getSupabaseAdmin();
+  let sb = getSupabaseAdmin();
   if (sb) {
     await ensureSupabaseAdminBootstrap();
-    const { data: existingProf } = await sb.from('profiles').select('id').eq('cpf', cpf).maybeSingle();
-    if (existingProf) {
+
+    const runWithKeyRotation = async <T extends { error: any; data?: any }>(
+      fn: (client: NonNullable<typeof sb>) => PromiseLike<T>
+    ): Promise<T> => {
+      let current = getSupabaseAdmin()!;
+      let res = await fn(current);
+      while (res.error && isInvalidApiKeyMessage(res.error.message) && rotateSupabaseServiceKey()) {
+        current = getSupabaseAdmin()!;
+        res = await fn(current);
+      }
+      return res;
+    };
+
+    const existingRes = await runWithKeyRotation(async (client) =>
+      client.from('profiles').select('id').eq('cpf', cpf).maybeSingle()
+    );
+    if (existingRes.error) {
+      if (isInvalidApiKeyMessage(existingRes.error.message)) {
+        throw new Error(
+          'Chave de API do Supabase inválida. Verifique nas variáveis de ambiente se SUPABASE_URL, SUPABASE_SECRET_KEY (sb_secret_...) e SUPABASE_SERVICE_ROLE_KEY estão corretas, sem aspas e do mesmo projeto.'
+        );
+      }
+      throw new Error(existingRes.error.message);
+    }
+    if (existingRes.data) {
       throw new Error('Este CPF já está cadastrado no sistema.');
     }
 
-    const { data: created, error } = await sb.auth.admin.createUser({
-      email: authEmail,
-      password: input.senha,
-      email_confirm: true,
-      user_metadata: {
-        cpf,
-        full_name: fullName,
-        phone,
-      },
-    });
+    const createdRes = await runWithKeyRotation((client) =>
+      client.auth.admin.createUser({
+        email: authEmail,
+        password: input.senha,
+        email_confirm: true,
+        user_metadata: {
+          cpf,
+          full_name: fullName,
+          phone,
+        },
+      })
+    );
 
-    if (error) {
-      if (error.message.toLowerCase().includes('already') || error.message.toLowerCase().includes('registered')) {
+    if (createdRes.error) {
+      const msg = createdRes.error.message || '';
+      if (isInvalidApiKeyMessage(msg)) {
+        throw new Error(
+          'Chave de API do Supabase inválida. Verifique nas variáveis de ambiente se SUPABASE_URL e SUPABASE_SECRET_KEY (sb_secret_...) estão corretas e sem aspas.'
+        );
+      }
+      if (msg.toLowerCase().includes('already') || msg.toLowerCase().includes('registered')) {
         throw new Error('Este CPF já está cadastrado no sistema.');
       }
-      throw new Error(error.message);
+      throw new Error(msg);
     }
 
-    const userId = created.user.id;
+    const userId = createdRes.data.user.id;
+    sb = getSupabaseAdmin()!;
     const { data: profile, error: profErr } = await sb
       .from('profiles')
       .upsert(
@@ -272,24 +306,24 @@ export async function registerUserByCpfPassword(input: {
 export async function authenticateUserByCpfPassword(cpfRaw: string, senha: string) {
   const cpf = cleanDigits(cpfRaw);
   const authEmail = cpfToAuthEmail(cpf);
-  const sb = getSupabaseAdmin();
+  let sb = getSupabaseAdmin();
 
   if (sb) {
     await ensureSupabaseAdminBootstrap();
-    const ephemeral = createEphemeralSupabaseClient();
-    if (!ephemeral) return null;
+    const { data: signInData, error: signInErr } = await signInSupabasePasswordWithFallback(authEmail, senha);
 
-    const { data: signInData, error: signInErr } = await ephemeral.auth.signInWithPassword({
-      email: authEmail,
-      password: senha,
-    });
-
-    if (signInErr || !signInData.user) {
+    if (signInErr || !signInData?.user) {
       return null;
     }
 
     const userId = signInData.user.id;
-    let { data: profile } = await sb.from('profiles').select('*').eq('id', userId).maybeSingle();
+    sb = getSupabaseAdmin()!;
+    let profRes = await sb.from('profiles').select('*').eq('id', userId).maybeSingle();
+    if (profRes.error && isInvalidApiKeyMessage(profRes.error.message) && rotateSupabaseServiceKey()) {
+      sb = getSupabaseAdmin()!;
+      profRes = await sb.from('profiles').select('*').eq('id', userId).maybeSingle();
+    }
+    let profile = profRes.data;
 
     if (!profile) {
       const isAdmin = cpf === ADMIN_MASTER_CPF;
