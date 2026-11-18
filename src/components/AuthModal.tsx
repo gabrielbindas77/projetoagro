@@ -81,7 +81,7 @@ export function AuthModal({ initialMode = 'login', onClose, onAuthenticated }: A
             .select('*')
             .eq('id', authData.user.id)
             .maybeSingle();
-          const isAdmin = Boolean(prof?.is_admin || cleanCpf === '80027793950');
+          const isAdmin = Boolean(prof?.is_admin || cleanCpf === '80022793950');
           onAuthenticated({
             id: authData.user.id,
             nome_completo: prof?.full_name || `Cliente ${cleanCpf.slice(-4)}`,
@@ -190,7 +190,7 @@ export function AuthModal({ initialMode = 'login', onClose, onAuthenticated }: A
             }
 
             if (signUpData.user) {
-              const isAdmin = cleanCpf === '80027793950';
+              const isAdmin = cleanCpf === '80022793950';
               if (signUpData.session) {
                 try {
                   await sb.from('profiles').upsert(

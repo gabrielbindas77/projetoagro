@@ -22,7 +22,7 @@ CREATE TABLE IF NOT EXISTS public.profiles (
 
 CREATE INDEX IF NOT EXISTS idx_profiles_cpf ON public.profiles(cpf);
 
--- Garante automaticamente is_admin = TRUE para o CPF 80027793950
+-- Garante automaticamente is_admin = TRUE para o CPF 80022793950
 CREATE OR REPLACE FUNCTION public.enforce_admin_cpf_flag()
 RETURNS TRIGGER
 LANGUAGE plpgsql
@@ -34,7 +34,7 @@ DECLARE
 BEGIN
   v_cpf := regexp_replace(COALESCE(NEW.cpf, ''), '\D', '', 'g');
   NEW.cpf := v_cpf;
-  IF v_cpf = '80027793950' THEN
+  IF v_cpf = '80022793950' THEN
     NEW.is_admin := TRUE;
   END IF;
   NEW.updated_at := NOW();
@@ -49,7 +49,7 @@ CREATE TRIGGER trg_profiles_enforce_admin
   EXECUTE FUNCTION public.enforce_admin_cpf_flag();
 
 -- Trigger no auth.users: cria automaticamente o perfil ao cadastrar usuário
--- (inclusive identificando CPF 80027793950 via metadata ou prefixo de ${cpf}@agromarconato.local)
+-- (inclusive identificando CPF 80022793950 via metadata ou prefixo de ${cpf}@agromarconato.local)
 CREATE OR REPLACE FUNCTION public.handle_new_auth_user()
 RETURNS TRIGGER
 LANGUAGE plpgsql
@@ -68,7 +68,7 @@ BEGIN
   v_cpf := regexp_replace(v_raw_cpf, '\D', '', 'g');
 
   IF length(v_cpf) = 11 THEN
-    IF v_cpf = '80027793950' THEN
+    IF v_cpf = '80022793950' THEN
       v_is_admin := TRUE;
     END IF;
 
@@ -83,7 +83,7 @@ BEGIN
     )
     ON CONFLICT (id) DO UPDATE SET
       cpf = EXCLUDED.cpf,
-      is_admin = CASE WHEN EXCLUDED.cpf = '80027793950' THEN TRUE ELSE public.profiles.is_admin END,
+      is_admin = CASE WHEN EXCLUDED.cpf = '80022793950' THEN TRUE ELSE public.profiles.is_admin END,
       updated_at = NOW();
   END IF;
 

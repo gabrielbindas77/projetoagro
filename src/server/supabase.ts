@@ -84,7 +84,7 @@ function isValidPublicKeyCandidate(key: string, projectRef: string): boolean {
 export const ADMIN_MASTER_CPF = cleanDigits(
   cleanEnvValue(process.env.INITIAL_ADMIN_CPF) ||
     cleanEnvValue(process.env.ADMIN_BOOTSTRAP_CPF) ||
-    '80027793950'
+    '80022793950'
 );
 export const ADMIN_MASTER_PASSWORD =
   cleanEnvValue(process.env.INITIAL_ADMIN_PASSWORD) ||
@@ -256,24 +256,28 @@ export async function ensureSupabaseAdminBootstrap() {
     const adminEmail = cpfToAuthEmail(ADMIN_MASTER_CPF);
     const adminName = cleanEnvValue(process.env.ADMIN_BOOTSTRAP_NOME) || 'Administrador Agro Marconato';
 
-    let targetUserId: string | null = null;
+    const { data: existingProfile } = await sb
+      .from('profiles')
+      .select('id, is_admin')
+      .eq('cpf', ADMIN_MASTER_CPF)
+      .maybeSingle();
 
-    // Check if user already exists in Supabase Auth
-    const { data: listData } = await sb.auth.admin.listUsers({ page: 1, perPage: 200 });
-    const matchedUser = listData?.users?.find((u) => u.email?.toLowerCase() === adminEmail);
+    if (existingProfile && existingProfile.is_admin) {
+      bootstrappedAdmin = true;
+      return;
+    }
 
-    if (matchedUser) {
-      targetUserId = matchedUser.id;
-      // Update password to guarantee it matches INITIAL_ADMIN_PASSWORD
-      await sb.auth.admin.updateUserById(targetUserId, {
-        password: ADMIN_MASTER_PASSWORD,
-        email_confirm: true,
-        user_metadata: {
-          cpf: ADMIN_MASTER_CPF,
-          full_name: adminName,
-        },
-      });
-    } else {
+    let targetUserId: string | null = existingProfile?.id || null;
+
+    if (!targetUserId) {
+      const { data: listData } = await sb.auth.admin.listUsers({ page: 1, perPage: 200 });
+      const matchedUser = listData?.users?.find((u) => u.email?.toLowerCase() === adminEmail);
+      if (matchedUser) {
+        targetUserId = matchedUser.id;
+      }
+    }
+
+    if (!targetUserId) {
       const { data: createdAuth, error: createErr } = await sb.auth.admin.createUser({
         email: adminEmail,
         password: ADMIN_MASTER_PASSWORD,
@@ -287,15 +291,10 @@ export async function ensureSupabaseAdminBootstrap() {
       if (createdAuth?.user) {
         targetUserId = createdAuth.user.id;
       } else if (createErr) {
-        // Fallback search in case of race condition or existing user
         const { data: retryList } = await sb.auth.admin.listUsers({ page: 1, perPage: 200 });
         const retryMatched = retryList?.users?.find((u) => u.email?.toLowerCase() === adminEmail);
         if (retryMatched) {
           targetUserId = retryMatched.id;
-          await sb.auth.admin.updateUserById(targetUserId, {
-            password: ADMIN_MASTER_PASSWORD,
-            email_confirm: true,
-          });
         }
       }
     }
@@ -311,7 +310,7 @@ export async function ensureSupabaseAdminBootstrap() {
         },
         { onConflict: 'id' }
       );
-      console.info(`[SUPABASE] Administrador principal sincronizado com sucesso — CPF: ${ADMIN_MASTER_CPF}`);
+      console.info(`[SUPABASE] Administrador principal inicializado — CPF: ${ADMIN_MASTER_CPF}`);
     }
 
     bootstrappedAdmin = true;
