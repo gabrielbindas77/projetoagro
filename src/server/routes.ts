@@ -70,7 +70,6 @@ import {
   normalizeText,
   validatePasswordStrength,
   verifyMercadoPagoWebhookSignature,
-  verifyPhoneNumberWithApi,
 } from './utils.ts';
 import { broadcastChatMessage, broadcastOrderUpdate } from './ws.ts';
 
@@ -198,24 +197,8 @@ apiRouter.get('/cep/:cep', optionalAuth, async (req, res) => {
 // ==============================================================================
 
 apiRouter.post('/auth/validate-phone', async (req, res) => {
-  try {
-    const rawPhone = String(req.body?.telefone || req.body?.phone || '');
-    const result = await verifyPhoneNumberWithApi(rawPhone);
-    if (!result.valid || !result.active) {
-      return res.status(400).json({
-        valid: false,
-        active: false,
-        error: result.message,
-      });
-    }
-    return res.json(result);
-  } catch (err: any) {
-    return res.status(500).json({
-      valid: false,
-      active: false,
-      error: err?.message || 'Erro ao validar telefone.',
-    });
-  }
+  const digits = cleanDigits(String(req.body?.telefone || req.body?.phone || ''));
+  return res.json({ valid: true, active: true, normalized: digits });
 });
 
 apiRouter.post('/auth/register', async (req, res) => {
@@ -223,7 +206,7 @@ apiRouter.post('/auth/register', async (req, res) => {
     const body = req.body || {};
     const fullName = String(body.nome_completo ?? body.full_name ?? '').trim();
     const rawCpf = body.cpf;
-    const rawTelefone = String(body.telefone ?? body.phone ?? '').trim();
+    const cleanPhone = cleanDigits(String(body.telefone ?? body.phone ?? ''));
     const senha = String(body.senha ?? body.password ?? '');
     const confirmacao = body.confirmacao_senha ?? body.confirm_password;
 
@@ -238,10 +221,9 @@ apiRouter.post('/auth/register', async (req, res) => {
       return res.status(400).json({ error: 'CPF inválido. Verifique os 11 dígitos informados.' });
     }
 
-    const phoneCheck = await verifyPhoneNumberWithApi(rawTelefone);
-    if (!phoneCheck.valid || !phoneCheck.active) {
+    if (cleanPhone.length < 8) {
       return res.status(400).json({
-        error: phoneCheck.message,
+        error: 'Informe seu telefone / WhatsApp.',
       });
     }
 
@@ -257,7 +239,7 @@ apiRouter.post('/auth/register', async (req, res) => {
       cpf,
       senha,
       nome_completo: fullName,
-      telefone: phoneCheck.normalized,
+      telefone: cleanPhone,
     });
 
     const token = signSessionToken({

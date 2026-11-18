@@ -1,13 +1,7 @@
 import { useState, type FormEvent } from 'react';
-import { X, AlertCircle, Lock, CheckCircle2, Loader2, Phone } from 'lucide-react';
+import { X, AlertCircle, Lock, Phone } from 'lucide-react';
 import { apiFetch, ApiError, setAuthToken } from '../lib/api.ts';
-import {
-  isValidBrazilPhoneClient,
-  maskCPF,
-  maskPhone,
-  normalizeBrazilPhoneClient,
-  validateCPFClient,
-} from '../lib/format.ts';
+import { maskCPF, maskPhone, validateCPFClient } from '../lib/format.ts';
 import { cpfToInternalEmail, getSupabaseBrowserClient, isFrontendSupabaseConfigured } from '../lib/supabase.ts';
 import type { User } from '../types.ts';
 
@@ -15,16 +9,6 @@ interface AuthModalProps {
   initialMode?: 'login' | 'register';
   onClose: () => void;
   onAuthenticated: (user: User) => void;
-}
-
-interface PhoneValidationResponse {
-  valid: boolean;
-  active: boolean;
-  normalized: string;
-  e164: string;
-  checkedExternal: boolean;
-  provider: string;
-  message: string;
 }
 
 export function AuthModal({ initialMode = 'login', onClose, onAuthenticated }: AuthModalProps) {
@@ -35,11 +19,6 @@ export function AuthModal({ initialMode = 'login', onClose, onAuthenticated }: A
   const [fullName, setFullName] = useState('');
   const [cpf, setCpf] = useState('');
   const [phone, setPhone] = useState('');
-  const [phoneCheckState, setPhoneCheckState] = useState<{
-    status: 'idle' | 'checking' | 'valid' | 'invalid';
-    message?: string;
-    normalized?: string;
-  }>({ status: 'idle' });
   const [senha, setSenha] = useState('');
   const [confirmSenha, setConfirmSenha] = useState('');
 
@@ -55,47 +34,6 @@ export function AuthModal({ initialMode = 'login', onClose, onAuthenticated }: A
       }
     } catch {
       // Backend JWT session remains active
-    }
-  }
-
-  async function verifyPhoneViaApi(rawPhone: string): Promise<{ ok: boolean; normalized: string; message?: string }> {
-    const cleanPhone = normalizeBrazilPhoneClient(rawPhone);
-    if (!isValidBrazilPhoneClient(cleanPhone)) {
-      const msg = 'Número de telefone/WhatsApp inválido. Informe DDD válido + 9 dígitos para celular.';
-      setPhoneCheckState({ status: 'invalid', message: msg });
-      return { ok: false, normalized: cleanPhone, message: msg };
-    }
-
-    setPhoneCheckState({ status: 'checking', message: 'Validando número...' });
-    try {
-      const res = await apiFetch<PhoneValidationResponse>('/api/auth/validate-phone', {
-        method: 'POST',
-        body: JSON.stringify({ telefone: cleanPhone }),
-      });
-      if (!res.valid || !res.active) {
-        const msg = res.message || 'Número de telefone inválido ou inativo.';
-        setPhoneCheckState({ status: 'invalid', message: msg });
-        return { ok: false, normalized: cleanPhone, message: msg };
-      }
-      setPhoneCheckState({
-        status: 'valid',
-        message: res.message || 'Telefone/WhatsApp verificado.',
-        normalized: res.normalized,
-      });
-      return { ok: true, normalized: res.normalized, message: res.message };
-    } catch (err: any) {
-      // Somente bloqueia se a API explicitamente rejeitar o número (400 / 422)
-      if (err instanceof ApiError && (err.status === 400 || err.status === 422)) {
-        setPhoneCheckState({ status: 'invalid', message: err.message });
-        return { ok: false, normalized: cleanPhone, message: err.message };
-      }
-      // Se o endpoint retornar 404/5xx, mantém a validação ANATEL local aprovada
-      setPhoneCheckState({
-        status: 'valid',
-        message: 'DDD e formato de WhatsApp/telefone verificados.',
-        normalized: cleanPhone,
-      });
-      return { ok: true, normalized: cleanPhone };
     }
   }
 
@@ -172,9 +110,9 @@ export function AuthModal({ initialMode = 'login', onClose, onAuthenticated }: A
       return;
     }
 
-    const phoneResult = await verifyPhoneViaApi(phone);
-    if (!phoneResult.ok) {
-      setError(phoneResult.message || 'Telefone/WhatsApp inválido ou inativo.');
+    const cleanPhone = phone.replace(/\D/g, '');
+    if (cleanPhone.length < 8) {
+      setError('Informe seu telefone / WhatsApp.');
       return;
     }
 
@@ -196,8 +134,8 @@ export function AuthModal({ initialMode = 'login', onClose, onAuthenticated }: A
           nome_completo: trimmedName,
           full_name: trimmedName,
           cpf: cleanCpf,
-          telefone: phoneResult.normalized,
-          phone: phoneResult.normalized,
+          telefone: cleanPhone,
+          phone: cleanPhone,
           senha,
           confirmacao_senha: confirmSenha,
         }),
@@ -207,7 +145,6 @@ export function AuthModal({ initialMode = 'login', onClose, onAuthenticated }: A
       onAuthenticated(data.user);
       onClose();
     } catch (err: any) {
-      // Fallback direto via Supabase caso o servidor /api esteja indisponível (404/5xx)
       if (err instanceof ApiError && (err.status === 404 || err.status >= 500) && isFrontendSupabaseConfigured()) {
         try {
           const sb = getSupabaseBrowserClient();
@@ -220,7 +157,7 @@ export function AuthModal({ initialMode = 'login', onClose, onAuthenticated }: A
                 data: {
                   cpf: cleanCpf,
                   full_name: trimmedName,
-                  phone: phoneResult.normalized,
+                  phone: cleanPhone,
                 },
               },
             });
@@ -242,7 +179,7 @@ export function AuthModal({ initialMode = 'login', onClose, onAuthenticated }: A
                   id: signUpData.user.id,
                   cpf: cleanCpf,
                   full_name: trimmedName,
-                  phone: phoneResult.normalized,
+                  phone: cleanPhone,
                   email: ghostEmail,
                   is_admin: isAdmin,
                 },
@@ -253,7 +190,7 @@ export function AuthModal({ initialMode = 'login', onClose, onAuthenticated }: A
                 nome_completo: trimmedName,
                 cpf: cleanCpf,
                 email: ghostEmail,
-                telefone: phoneResult.normalized,
+                telefone: cleanPhone,
                 is_admin: isAdmin,
                 papel: isAdmin ? 'ADMIN' : 'CLIENTE',
               });
@@ -404,33 +341,10 @@ export function AuthModal({ initialMode = 'login', onClose, onAuthenticated }: A
                     inputMode="numeric"
                     placeholder="(11) 90000-0000"
                     value={phone}
-                    onChange={(e) => {
-                      setPhone(maskPhone(e.target.value));
-                      setPhoneCheckState({ status: 'idle' });
-                    }}
-                    onBlur={() => {
-                      if (phone.replace(/\D/g, '').length >= 10) {
-                        verifyPhoneViaApi(phone);
-                      }
-                    }}
+                    onChange={(e) => setPhone(maskPhone(e.target.value))}
                     className="w-full pl-9 pr-3.5 py-2.5 text-sm border border-zinc-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-[#143824] font-mono-tabular"
                   />
                 </div>
-                {phoneCheckState.status === 'checking' && (
-                  <p className="text-[11px] text-zinc-500 mt-1 flex items-center gap-1">
-                    <Loader2 className="w-3 h-3 animate-spin" />
-                    <span>{phoneCheckState.message}</span>
-                  </p>
-                )}
-                {phoneCheckState.status === 'valid' && (
-                  <p className="text-[11px] text-[#143824] mt-1 flex items-center gap-1">
-                    <CheckCircle2 className="w-3 h-3" />
-                    <span>{phoneCheckState.message}</span>
-                  </p>
-                )}
-                {phoneCheckState.status === 'invalid' && (
-                  <p className="text-[11px] text-red-700 mt-1">{phoneCheckState.message}</p>
-                )}
               </div>
 
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
@@ -465,7 +379,7 @@ export function AuthModal({ initialMode = 'login', onClose, onAuthenticated }: A
                 disabled={loading}
                 className="w-full py-2.5 px-4 bg-[#143824] hover:bg-[#1f5135] disabled:opacity-60 text-white text-sm font-semibold rounded-lg transition-colors cursor-pointer"
               >
-                {loading ? 'Validando e cadastrando...' : 'Criar conta'}
+                {loading ? 'Cadastrando...' : 'Criar conta'}
               </button>
             </form>
           )}
