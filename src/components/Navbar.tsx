@@ -8,7 +8,7 @@ interface NavbarProps {
   user: User | null;
   cartCount: number;
   onOpenCart: () => void;
-  onOpenAuth: (mode?: 'login' | 'register' | 'verify') => void;
+  onOpenAuth: (mode?: 'login' | 'register') => void;
   onLogout: () => void;
 }
 
@@ -22,6 +22,7 @@ export function Navbar({
   onLogout,
 }: NavbarProps) {
   const [mobileOpen, setMobileOpen] = useState(false);
+  const isAdmin = Boolean(user?.is_admin || user?.papel === 'ADMIN');
 
   const navLinkClass = (active: boolean) =>
     `text-sm font-medium transition-colors whitespace-nowrap shrink-0 pb-0.5 border-b-2 ${
@@ -33,7 +34,6 @@ export function Navbar({
   return (
     <header className="sticky top-0 z-40 bg-white/95 backdrop-blur-sm border-b border-zinc-200">
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between gap-8">
-        {/* Zone 1: Single-element brand wordmark */}
         <a
           href="/"
           onClick={(e) => {
@@ -62,7 +62,6 @@ export function Navbar({
           <span className="font-display">Agro Marconato</span>
         </a>
 
-        {/* Zone 2: 4-5 concise single-line text nav links */}
         <nav className="hidden md:flex items-center gap-7" aria-label="Navegação principal">
           <a
             href="/"
@@ -84,27 +83,31 @@ export function Navbar({
           >
             Ofertas
           </a>
-          <a
-            href="/meus-pedidos"
-            onClick={(e) => {
-              e.preventDefault();
-              onNavigate('/meus-pedidos');
-            }}
-            className={navLinkClass(currentPath === '/meus-pedidos')}
-          >
-            Meus Pedidos
-          </a>
-          <a
-            href="/atendimento"
-            onClick={(e) => {
-              e.preventDefault();
-              onNavigate('/atendimento');
-            }}
-            className={navLinkClass(currentPath === '/atendimento')}
-          >
-            Atendimento
-          </a>
-          {user?.papel === 'ADMIN' && (
+          {!isAdmin && (
+            <>
+              <a
+                href="/meus-pedidos"
+                onClick={(e) => {
+                  e.preventDefault();
+                  onNavigate('/meus-pedidos');
+                }}
+                className={navLinkClass(currentPath === '/meus-pedidos')}
+              >
+                Meus Pedidos
+              </a>
+              <a
+                href="/atendimento"
+                onClick={(e) => {
+                  e.preventDefault();
+                  onNavigate('/atendimento');
+                }}
+                className={navLinkClass(currentPath === '/atendimento')}
+              >
+                Atendimento
+              </a>
+            </>
+          )}
+          {isAdmin && (
             <a
               href="/admin"
               onClick={(e) => {
@@ -113,31 +116,21 @@ export function Navbar({
               }}
               className={navLinkClass(currentPath === '/admin')}
             >
-              Painel Admin
+              Gestão da Loja
             </a>
           )}
         </nav>
 
-        {/* Zone 3: Account & Cart action */}
         <div className="flex items-center gap-3 shrink-0">
           {user ? (
             <div className="hidden sm:flex items-center gap-3">
-              {user.papel === 'CLIENTE' && (!user.email_verificado || !user.telefone_verificado) && (
-                <button
-                  type="button"
-                  onClick={() => onOpenAuth('verify')}
-                  className="text-xs font-medium text-amber-800 hover:underline whitespace-nowrap shrink-0 cursor-pointer"
-                >
-                  Confirmar contato
-                </button>
-              )}
               <button
                 type="button"
-                onClick={() => onNavigate(user.papel === 'ADMIN' ? '/admin' : '/meus-pedidos')}
+                onClick={() => onNavigate(isAdmin ? '/admin' : '/meus-pedidos')}
                 className="flex items-center gap-1.5 text-sm font-medium text-zinc-700 hover:text-[#143824] whitespace-nowrap shrink-0 cursor-pointer"
                 title={user.nome_completo}
               >
-                {user.papel === 'ADMIN' ? (
+                {isAdmin ? (
                   <ShieldCheck className="w-4 h-4 text-[#143824]" />
                 ) : (
                   <UserIcon className="w-4 h-4 text-zinc-500" />
@@ -158,13 +151,13 @@ export function Navbar({
             <button
               type="button"
               onClick={() => onOpenAuth('login')}
-              className="hidden sm:inline-flex text-sm font-medium text-zinc-700 hover:text-[#143824] whitespace-nowrap shrink-0 px-2 py-1.5 cursor-pointer"
+              className="hidden sm:inline-flex text-sm font-medium text-zinc-700 hover:text-[#143824] whitespace-nowrap shrink-0 px-3 py-1.5 border border-zinc-200 rounded-lg hover:border-[#143824] cursor-pointer"
             >
               Entrar
             </button>
           )}
 
-          {user?.papel !== 'ADMIN' && (
+          {!isAdmin && (
             <button
               type="button"
               onClick={onOpenCart}
@@ -189,7 +182,6 @@ export function Navbar({
         </div>
       </div>
 
-      {/* Mobile navigation drawer */}
       {mobileOpen && (
         <div className="md:hidden border-t border-zinc-200 bg-white px-4 py-4 space-y-3">
           <div className="flex flex-col gap-2">
@@ -213,27 +205,31 @@ export function Navbar({
             >
               Ofertas
             </button>
-            <button
-              type="button"
-              onClick={() => {
-                onNavigate('/meus-pedidos');
-                setMobileOpen(false);
-              }}
-              className="text-left py-2 text-sm font-medium text-zinc-800"
-            >
-              Meus Pedidos
-            </button>
-            <button
-              type="button"
-              onClick={() => {
-                onNavigate('/atendimento');
-                setMobileOpen(false);
-              }}
-              className="text-left py-2 text-sm font-medium text-zinc-800"
-            >
-              Atendimento
-            </button>
-            {user?.papel === 'ADMIN' && (
+            {!isAdmin && (
+              <>
+                <button
+                  type="button"
+                  onClick={() => {
+                    onNavigate('/meus-pedidos');
+                    setMobileOpen(false);
+                  }}
+                  className="text-left py-2 text-sm font-medium text-zinc-800"
+                >
+                  Meus Pedidos
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    onNavigate('/atendimento');
+                    setMobileOpen(false);
+                  }}
+                  className="text-left py-2 text-sm font-medium text-zinc-800"
+                >
+                  Atendimento
+                </button>
+              </>
+            )}
+            {isAdmin && (
               <button
                 type="button"
                 onClick={() => {
@@ -242,7 +238,7 @@ export function Navbar({
                 }}
                 className="text-left py-2 text-sm font-semibold text-[#143824]"
               >
-                Painel Admin
+                Gestão da Loja
               </button>
             )}
           </div>

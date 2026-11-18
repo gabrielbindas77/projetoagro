@@ -6,7 +6,7 @@ interface CartDrawerProps {
   open: boolean;
   cart: CartState;
   onClose: () => void;
-  onUpdateItem: (item: CartItem, nextValue: { quantidade?: number; valorDesejadoCentavos?: number }) => Promise<void>;
+  onUpdateItem: (item: CartItem, nextValue: { quantidade: number }) => Promise<void>;
   onRemoveItem: (itemId: string) => Promise<void>;
   onCheckout: () => void;
 }
@@ -49,112 +49,91 @@ export function CartDrawer({
               </p>
             </div>
           ) : (
-            cart.itens.map((item) => (
-              <div key={item.id} className="pb-4 border-b border-zinc-200 flex gap-3.5">
-                <div className="w-20 h-16 rounded-lg overflow-hidden bg-[#F5F2EB] shrink-0 border border-zinc-200">
-                  {item.imagem_principal ? (
-                    <img
-                      src={item.imagem_principal}
-                      alt={item.produto_nome}
-                      className="w-full h-full object-cover"
-                      referrerPolicy="no-referrer"
-                    />
-                  ) : null}
-                </div>
-                <div className="flex-1 min-w-0">
-                  <div className="flex items-start justify-between gap-2">
-                    <h3 className="text-sm font-semibold text-zinc-900 truncate">{item.produto_nome}</h3>
-                    <button
-                      type="button"
-                      onClick={() => onRemoveItem(item.id)}
-                      className="text-zinc-400 hover:text-red-700 p-1 cursor-pointer"
-                      aria-label="Remover item"
-                    >
-                      <Trash2 className="w-4 h-4" />
-                    </button>
+            cart.itens.map((item) => {
+              const isKg = item.unit_type === 'kg' || item.modo_compra === 'PESO_KG';
+              return (
+                <div key={item.id} className="pb-4 border-b border-zinc-200 flex gap-3.5">
+                  <div className="w-20 h-16 rounded-lg overflow-hidden bg-[#F5F2EB] shrink-0 border border-zinc-200">
+                    {item.imagem_principal ? (
+                      <img
+                        src={item.imagem_principal}
+                        alt={item.produto_nome}
+                        className="w-full h-full object-cover"
+                        referrerPolicy="no-referrer"
+                      />
+                    ) : null}
                   </div>
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-start justify-between gap-2">
+                      <h3 className="text-sm font-semibold text-zinc-900 truncate">{item.produto_nome}</h3>
+                      <button
+                        type="button"
+                        onClick={() => onRemoveItem(item.id)}
+                        className="text-zinc-400 hover:text-red-700 p-1 cursor-pointer"
+                        aria-label="Remover item"
+                      >
+                        <Trash2 className="w-4 h-4" />
+                      </button>
+                    </div>
 
-                  <p className="text-xs text-zinc-500 mt-0.5">
-                    {item.modo_compra === 'UNIDADE' && `${item.quantidade} un.`}
-                    {item.modo_compra === 'PESO_KG' &&
-                      `${formatWeight(item.quantidade, item.precisao_pesagem)} kg`}
-                    {item.modo_compra === 'VALOR_DINHEIRO' &&
-                      `Valor ${formatBRL(item.valor_desejado_centavos || item.subtotal_centavos)} (${formatWeight(
-                        item.quantidade,
-                        item.precisao_pesagem
-                      )} kg)`}
-                  </p>
+                    <p className="text-xs text-zinc-500 mt-0.5">
+                      {!isKg
+                        ? `${item.quantidade} un. × ${formatBRL(item.preco_unitario_snapshot_centavos)}`
+                        : `${formatWeight(item.quantidade, item.precisao_pesagem)} kg × ${formatBRL(
+                            item.preco_unitario_snapshot_centavos
+                          )}/kg`}
+                    </p>
 
-                  <div className="mt-2.5 flex items-center justify-between gap-2">
-                    {item.modo_compra === 'UNIDADE' && (
-                      <div className="inline-flex items-center border border-zinc-300 rounded-md">
-                        <button
-                          type="button"
-                          onClick={() =>
-                            item.quantidade > 1
-                              ? onUpdateItem(item, { quantidade: item.quantidade - 1 })
-                              : onRemoveItem(item.id)
-                          }
-                          className="px-2 py-0.5 text-xs font-medium text-zinc-700 hover:bg-zinc-100 cursor-pointer"
-                        >
-                          -
-                        </button>
-                        <span className="px-2.5 text-xs font-mono-tabular">{item.quantidade}</span>
-                        <button
-                          type="button"
-                          onClick={() => onUpdateItem(item, { quantidade: item.quantidade + 1 })}
-                          className="px-2 py-0.5 text-xs font-medium text-zinc-700 hover:bg-zinc-100 cursor-pointer"
-                        >
-                          +
-                        </button>
-                      </div>
-                    )}
-
-                    {item.modo_compra === 'PESO_KG' && (
-                      <div className="flex items-center gap-1.5">
-                        <input
-                          type="number"
-                          step="0.1"
-                          min="0.1"
-                          defaultValue={item.quantidade}
-                          onBlur={(e) => {
-                            const val = Number(e.target.value);
-                            if (val > 0 && val !== item.quantidade) {
-                              onUpdateItem(item, { quantidade: val });
+                    <div className="mt-2.5 flex items-center justify-between gap-2">
+                      {!isKg ? (
+                        <div className="inline-flex items-center border border-zinc-300 rounded-md">
+                          <button
+                            type="button"
+                            onClick={() =>
+                              item.quantidade > 1
+                                ? onUpdateItem(item, { quantidade: item.quantidade - 1 })
+                                : onRemoveItem(item.id)
                             }
-                          }}
-                          className="w-20 px-2 py-1 text-xs border border-zinc-300 rounded font-mono-tabular"
-                        />
-                        <span className="text-xs text-zinc-500">kg</span>
-                      </div>
-                    )}
+                            className="px-2 py-0.5 text-xs font-medium text-zinc-700 hover:bg-zinc-100 cursor-pointer"
+                          >
+                            -
+                          </button>
+                          <span className="px-2.5 text-xs font-mono-tabular">{item.quantidade}</span>
+                          <button
+                            type="button"
+                            onClick={() => onUpdateItem(item, { quantidade: item.quantidade + 1 })}
+                            className="px-2 py-0.5 text-xs font-medium text-zinc-700 hover:bg-zinc-100 cursor-pointer"
+                          >
+                            +
+                          </button>
+                        </div>
+                      ) : (
+                        <div className="flex items-center gap-1.5">
+                          <input
+                            type="number"
+                            step="0.1"
+                            min="0.1"
+                            defaultValue={item.quantidade}
+                            onBlur={(e) => {
+                              const val = Number(e.target.value);
+                              if (val > 0 && val !== item.quantidade) {
+                                onUpdateItem(item, { quantidade: val });
+                              }
+                            }}
+                            className="w-20 px-2 py-1 text-xs border border-zinc-300 rounded font-mono-tabular"
+                          />
+                          <span className="text-xs text-zinc-500">kg</span>
+                        </div>
+                      )}
 
-                    {item.modo_compra === 'VALOR_DINHEIRO' && (
-                      <div className="flex items-center gap-1">
-                        <span className="text-xs text-zinc-500">R$</span>
-                        <input
-                          type="number"
-                          step="1"
-                          min="1"
-                          defaultValue={((item.valor_desejado_centavos || item.subtotal_centavos) / 100).toFixed(2)}
-                          onBlur={(e) => {
-                            const val = Math.round(Number(e.target.value) * 100);
-                            if (val >= 100 && val !== item.valor_desejado_centavos) {
-                              onUpdateItem(item, { valorDesejadoCentavos: val });
-                            }
-                          }}
-                          className="w-20 px-2 py-1 text-xs border border-zinc-300 rounded font-mono-tabular"
-                        />
-                      </div>
-                    )}
-
-                    <span className="text-sm font-bold text-zinc-900 font-mono-tabular">
-                      {formatBRL(item.subtotal_centavos)}
-                    </span>
+                      <span className="text-sm font-bold text-zinc-900 font-mono-tabular">
+                        {formatBRL(item.subtotal_centavos)}
+                      </span>
+                    </div>
                   </div>
                 </div>
-              </div>
-            ))
+              );
+            })
           )}
         </div>
 
@@ -165,7 +144,7 @@ export function CartDrawer({
               <span className="font-mono-tabular">{formatBRL(cart.subtotal_centavos)}</span>
             </div>
             <div className="flex items-center justify-between text-sm text-zinc-600">
-              <span>Frete padrão</span>
+              <span>Frete fixo</span>
               <span className="font-mono-tabular">{formatBRL(cart.frete_centavos)}</span>
             </div>
             <div className="pt-2 border-t border-zinc-200 flex items-center justify-between text-base font-bold text-zinc-900">

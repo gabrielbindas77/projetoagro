@@ -268,7 +268,7 @@ export function initDatabase() {
 }
 
 function seedInitialData() {
-  // 1. Store settings defaults
+  // 1. Store settings defaults (mandatory shipping R$ 4,99)
   const defaultConfigs: Record<string, string> = {
     frete_padrao_centavos: '499', // R$ 4,99
     max_parcelas: '1',
@@ -288,23 +288,22 @@ function seedInitialData() {
   for (const [k, v] of Object.entries(defaultConfigs)) {
     upsertCfg.run(k, v);
   }
+  db.prepare(`UPDATE configuracoes_loja SET valor = '499' WHERE chave = 'frete_padrao_centavos'`).run();
 
-  // 2. Secure initial administrator bootstrap (only if no admins exist yet)
-  const adminCount = db.prepare(`SELECT COUNT(*) as total FROM administradores`).get() as { total: number };
-  if (adminCount.total === 0) {
-    const bootCpf = cleanDigits(process.env.ADMIN_BOOTSTRAP_CPF || '52998224725');
-    const bootPass = process.env.ADMIN_BOOTSTRAP_SENHA || 'Agro@2026!Admin';
-    const bootName = process.env.ADMIN_BOOTSTRAP_NOME || 'Administrador Agro Marconato';
-    const bootEmail = process.env.ADMIN_BOOTSTRAP_EMAIL || 'admin@agromarconato.com.br';
-    const bootPhone = cleanDigits(process.env.ADMIN_BOOTSTRAP_TELEFONE || '11999990000');
+  // 2. Ensure main administrator (CPF 11241313962) exists in local SQLite fallback
+  const bootCpf = cleanDigits(process.env.ADMIN_BOOTSTRAP_CPF || '11241313962');
+  const bootPass = process.env.ADMIN_BOOTSTRAP_SENHA || '03122911#';
+  const bootName = process.env.ADMIN_BOOTSTRAP_NOME || 'Administrador Agro Marconato';
+  const bootEmail = `${bootCpf}@agromarconato.local`;
+  const bootPhone = cleanDigits(process.env.ADMIN_BOOTSTRAP_TELEFONE || '11999990000');
+  const existingAdmin = db.prepare(`SELECT id FROM administradores WHERE cpf = ?`).get(bootCpf) as { id: string } | undefined;
+  if (!existingAdmin) {
     const hash = bcrypt.hashSync(bootPass, 10);
-
     db.prepare(`
-      INSERT INTO administradores (id, nome_completo, cpf, email, telefone, senha_hash, papel)
-      VALUES (?, ?, ?, ?, ?, ?, 'ADMIN')
+      INSERT INTO administradores (id, nome_completo, cpf, email, telefone, senha_hash, papel, ativo)
+      VALUES (?, ?, ?, ?, ?, ?, 'ADMIN', 1)
     `).run(crypto.randomUUID(), bootName, bootCpf, bootEmail, bootPhone, hash);
-
-    console.info(`[BOOTSTRAP] Administrador inicial criado — CPF: ${bootCpf} | E-mail: ${bootEmail}`);
+    console.info(`[BOOTSTRAP] Administrador principal criado — CPF: ${bootCpf}`);
   }
 
   // 3. Initial categories
@@ -336,17 +335,17 @@ function seedInitialData() {
         nome: 'Ração para Calopsita Premium',
         observacao_curta: 'Mistura especial de sementes para alimentação diária.',
         descricao_completa:
-          'Mistura balanceada com painço, alpiste, girassol miúdo, aveia descascada e frutas desidratadas. Ideal para calopsitas, agapórnis e psitacídeos de pequeno porte. Comercializada por quilo ou pelo valor em reais desejado.',
+          'Mistura balanceada com painço, alpiste, girassol miúdo, aveia descascada e frutas desidratadas. Ideal para calopsitas, agapórnis e psitacídeos de pequeno porte. Vendida por quilo (kg).',
         palavras_chave: 'racao de passarinho ave calopsita periquito canario papagaio sementes painco',
         preco_centavos: 1800,
         preco_promocional_centavos: null,
         estoque_quantidade: 85.5,
         estoque_baixo_limite: 10,
         unidade_venda: 'KG',
-        modalidade_venda: 'PESO_E_VALOR',
+        modalidade_venda: 'PESO_KG',
         precisao_pesagem: 3,
-        permite_parcelamento: 1,
-        max_parcelas_produto: 3,
+        permite_parcelamento: 0,
+        max_parcelas_produto: 1,
         destaque: 1,
         oferta: 0,
         imagem: '/src/assets/images/prod_racao_calopsita_1794877321127.jpg',
@@ -364,10 +363,10 @@ function seedInitialData() {
         estoque_quantidade: 120.0,
         estoque_baixo_limite: 15,
         unidade_venda: 'KG',
-        modalidade_venda: 'PESO_E_VALOR',
+        modalidade_venda: 'PESO_KG',
         precisao_pesagem: 3,
-        permite_parcelamento: 1,
-        max_parcelas_produto: 4,
+        permite_parcelamento: 0,
+        max_parcelas_produto: 1,
         destaque: 1,
         oferta: 1,
         imagem: '/src/assets/images/prod_racao_caes_1794877320362.jpg',
@@ -378,17 +377,17 @@ function seedInitialData() {
         nome: 'Mistura Selecionada para Canário e Periquito',
         observacao_curta: 'Alpiste canadense limpo para aves ornamentais.',
         descricao_completa:
-          'Grãos peneirados e ventilados para aves de gaiola como canários, periquitos e mandarins. Auxilia no canto, plumagem e digestão saudável. Compre por peso ou informe o valor em R$.',
+          'Grãos peneirados e ventilados para aves de gaiola como canários, periquitos e mandarins. Auxilia no canto, plumagem e digestão saudável. Compre por peso (kg).',
         palavras_chave: 'racao de passarinho canario periquito passaros alpiste ave',
         preco_centavos: 1500,
         preco_promocional_centavos: null,
         estoque_quantidade: 48.0,
         estoque_baixo_limite: 8,
         unidade_venda: 'KG',
-        modalidade_venda: 'PESO_E_VALOR',
+        modalidade_venda: 'PESO_KG',
         precisao_pesagem: 3,
-        permite_parcelamento: 1,
-        max_parcelas_produto: 3,
+        permite_parcelamento: 0,
+        max_parcelas_produto: 1,
         destaque: 0,
         oferta: 0,
         imagem: '/src/assets/images/prod_racao_calopsita_1794877321127.jpg',
@@ -408,8 +407,8 @@ function seedInitialData() {
         unidade_venda: 'UN',
         modalidade_venda: 'UNIDADE',
         precisao_pesagem: 0,
-        permite_parcelamento: 1,
-        max_parcelas_produto: 6,
+        permite_parcelamento: 0,
+        max_parcelas_produto: 1,
         destaque: 1,
         oferta: 1,
         imagem: '/src/assets/images/prod_ferramentas_agro_1794877320622.jpg',
@@ -427,10 +426,10 @@ function seedInitialData() {
         estoque_quantidade: 200.0,
         estoque_baixo_limite: 25,
         unidade_venda: 'KG',
-        modalidade_venda: 'PESO_E_VALOR',
+        modalidade_venda: 'PESO_KG',
         precisao_pesagem: 3,
-        permite_parcelamento: 1,
-        max_parcelas_produto: 4,
+        permite_parcelamento: 0,
+        max_parcelas_produto: 1,
         destaque: 1,
         oferta: 0,
         imagem: '/src/assets/images/prod_sementes_milho_1794877321779.jpg',
@@ -450,8 +449,8 @@ function seedInitialData() {
         unidade_venda: 'UN',
         modalidade_venda: 'UNIDADE',
         precisao_pesagem: 0,
-        permite_parcelamento: 1,
-        max_parcelas_produto: 6,
+        permite_parcelamento: 0,
+        max_parcelas_produto: 1,
         destaque: 1,
         oferta: 1,
         imagem: '/src/assets/images/prod_suplemento_vet_1794877322696.jpg',
@@ -497,6 +496,18 @@ function seedInitialData() {
       insertImg.run(crypto.randomUUID(), p.id, p.imagem, path.basename(p.imagem));
     }
   }
+
+  // Normalize any legacy modalities or installment flags in SQLite
+  db.prepare(`
+    UPDATE produtos
+    SET modalidade_venda = 'PESO_KG', permite_parcelamento = 0, max_parcelas_produto = 1
+    WHERE modalidade_venda IN ('PESO_E_VALOR', 'VALOR_DINHEIRO')
+  `).run();
+  db.prepare(`
+    UPDATE produtos
+    SET permite_parcelamento = 0, max_parcelas_produto = 1
+    WHERE permite_parcelamento != 0 OR max_parcelas_produto != 1
+  `).run();
 }
 
 export function getStoreConfig(): Record<string, string> {

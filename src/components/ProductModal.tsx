@@ -1,5 +1,5 @@
 import { useState, useMemo } from 'react';
-import { X, Minus, Plus, Scale, Banknote, Package, CheckCircle2, AlertCircle } from 'lucide-react';
+import { X, Minus, Plus, Scale, Package, CheckCircle2, AlertCircle } from 'lucide-react';
 import { formatBRL, formatWeight } from '../lib/format.ts';
 import type { ModoCompra, Product, PublicConfig } from '../types.ts';
 
@@ -8,10 +8,10 @@ interface ProductModalProps {
   config: PublicConfig;
   onClose: () => void;
   onAddToCart: (payload: {
+    product: Product;
     produtoId: string;
     modoCompra: ModoCompra;
-    quantidade?: number;
-    valorDesejadoCentavos?: number;
+    quantidade: number;
   }) => Promise<void>;
 }
 
@@ -25,17 +25,11 @@ export function ProductModal({ product, config, onClose, onAddToCart }: ProductM
   const [activeImage, setActiveImage] = useState(images[0]?.url || '');
   const [imgFailed, setImgFailed] = useState(false);
 
-  const defaultMode: ModoCompra =
-    product.modalidade_venda === 'UNIDADE'
-      ? 'UNIDADE'
-      : product.modalidade_venda === 'VALOR_DINHEIRO'
-      ? 'VALOR_DINHEIRO'
-      : 'PESO_KG';
+  const isKg = product.unit_type === 'kg' || product.modalidade_venda === 'PESO_KG';
+  const modoCompra: ModoCompra = isKg ? 'PESO_KG' : 'UNIDADE';
 
-  const [modoCompra, setModoCompra] = useState<ModoCompra>(defaultMode);
   const [unidades, setUnidades] = useState(1);
   const [pesoKgInput, setPesoKgInput] = useState('1');
-  const [valorReaisInput, setValorReaisInput] = useState('50,00');
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [addedSuccess, setAddedSuccess] = useState(false);
@@ -46,32 +40,18 @@ export function ProductModal({ product, config, onClose, onAddToCart }: ProductM
 
   const parsedKg = useMemo(() => {
     const val = Number(pesoKgInput.replace(',', '.'));
-    return Number.isFinite(val) && val > 0 ? val : 0;
-  }, [pesoKgInput]);
-
-  const parsedValorCentavos = useMemo(() => {
-    const cleaned = valorReaisInput.replace(/[^\d,.]/g, '').replace(',', '.');
-    const val = Number(cleaned);
-    return Number.isFinite(val) && val > 0 ? Math.round(val * 100) : 0;
-  }, [valorReaisInput]);
-
-  const pesoCalculadoPorValor = useMemo(() => {
-    if (precoUnit <= 0 || parsedValorCentavos <= 0) return 0;
-    const fator = Math.pow(10, precisao);
-    return Math.round((parsedValorCentavos / precoUnit) * fator) / fator;
-  }, [parsedValorCentavos, precoUnit, precisao]);
+    return Number.isFinite(val) && val > 0 ? Number(val.toFixed(precisao)) : 0;
+  }, [pesoKgInput, precisao]);
 
   const subtotalCentavos = useMemo(() => {
-    if (modoCompra === 'UNIDADE') return unidades * precoUnit;
-    if (modoCompra === 'PESO_KG') return Math.round(parsedKg * precoUnit);
-    return parsedValorCentavos;
-  }, [modoCompra, unidades, parsedKg, parsedValorCentavos, precoUnit]);
+    if (!isKg) return unidades * precoUnit;
+    return Math.round(parsedKg * precoUnit);
+  }, [isKg, unidades, parsedKg, precoUnit]);
 
   const exceedsStock = useMemo(() => {
-    if (modoCompra === 'UNIDADE') return unidades > product.estoque_quantidade;
-    if (modoCompra === 'PESO_KG') return parsedKg > product.estoque_quantidade;
-    return pesoCalculadoPorValor > product.estoque_quantidade;
-  }, [modoCompra, unidades, parsedKg, pesoCalculadoPorValor, product.estoque_quantidade]);
+    if (!isKg) return unidades > product.estoque_quantidade;
+    return parsedKg > product.estoque_quantidade;
+  }, [isKg, unidades, parsedKg, product.estoque_quantidade]);
 
   async function handleConfirm() {
     setError(null);
@@ -79,15 +59,15 @@ export function ProductModal({ product, config, onClose, onAddToCart }: ProductM
     setSubmitting(true);
     try {
       await onAddToCart({
+        product,
         produtoId: product.id,
         modoCompra,
-        quantidade: modoCompra === 'UNIDADE' ? unidades : modoCompra === 'PESO_KG' ? parsedKg : undefined,
-        valorDesejadoCentavos: modoCompra === 'VALOR_DINHEIRO' ? parsedValorCentavos : undefined,
+        quantidade: isKg ? parsedKg : unidades,
       });
       setAddedSuccess(true);
       setTimeout(() => {
         onClose();
-      }, 650);
+      }, 450);
     } catch (err: any) {
       setError(err?.message || 'Erro ao adicionar ao carrinho.');
     } finally {
@@ -106,7 +86,7 @@ export function ProductModal({ product, config, onClose, onAddToCart }: ProductM
               {isOut
                 ? 'Produto esgotado'
                 : `Disponível: ${
-                    product.modalidade_venda === 'UNIDADE'
+                    !isKg
                       ? `${product.estoque_quantidade} un.`
                       : `${formatWeight(product.estoque_quantidade, precisao)} kg`
                   }`}
@@ -123,7 +103,6 @@ export function ProductModal({ product, config, onClose, onAddToCart }: ProductM
         </div>
 
         <div className="grid grid-cols-1 md:grid-cols-2">
-          {/* Left: Gallery */}
           <div className="p-6 bg-[#F5F2EB]/60 border-b md:border-b-0 md:border-r border-zinc-200 flex flex-col gap-4">
             <div className="aspect-[4/3] rounded-lg overflow-hidden bg-white border border-zinc-200 flex items-center justify-center">
               {activeImage && !imgFailed ? (
@@ -165,7 +144,6 @@ export function ProductModal({ product, config, onClose, onAddToCart }: ProductM
             </div>
           </div>
 
-          {/* Right: Contiguous Purchase Module */}
           <div className="p-6 flex flex-col justify-between gap-5">
             <div className="space-y-4">
               <div>
@@ -182,50 +160,16 @@ export function ProductModal({ product, config, onClose, onAddToCart }: ProductM
                 <div className="text-2xl font-bold text-[#143824] font-mono-tabular">
                   {formatBRL(precoUnit)}
                   <span className="text-sm font-normal text-zinc-500 ml-1.5">
-                    {product.modalidade_venda === 'UNIDADE' ? '/ unidade' : '/ kg'}
+                    {isKg ? '/ kg' : '/ unidade'}
                   </span>
                 </div>
               </div>
 
-              {/* Modality Switch for Peso e Valor */}
-              {product.modalidade_venda === 'PESO_E_VALOR' && (
+              {!isKg ? (
                 <div>
                   <label className="block text-xs font-medium text-zinc-700 mb-2">
-                    Como deseja comprar?
+                    Quantidade (unidades)
                   </label>
-                  <div className="grid grid-cols-2 gap-2 p-1 bg-zinc-100 rounded-lg">
-                    <button
-                      type="button"
-                      onClick={() => setModoCompra('PESO_KG')}
-                      className={`flex items-center justify-center gap-1.5 py-2 px-3 text-xs font-semibold rounded-md transition-colors cursor-pointer ${
-                        modoCompra === 'PESO_KG'
-                          ? 'bg-white text-[#143824] shadow-sm'
-                          : 'text-zinc-600 hover:text-zinc-900'
-                      }`}
-                    >
-                      <Scale className="w-3.5 h-3.5" />
-                      <span>Por quilo (kg)</span>
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setModoCompra('VALOR_DINHEIRO')}
-                      className={`flex items-center justify-center gap-1.5 py-2 px-3 text-xs font-semibold rounded-md transition-colors cursor-pointer ${
-                        modoCompra === 'VALOR_DINHEIRO'
-                          ? 'bg-white text-[#143824] shadow-sm'
-                          : 'text-zinc-600 hover:text-zinc-900'
-                      }`}
-                    >
-                      <Banknote className="w-3.5 h-3.5" />
-                      <span>Por valor (R$)</span>
-                    </button>
-                  </div>
-                </div>
-              )}
-
-              {/* Quantity / Weight / Money Selector */}
-              {modoCompra === 'UNIDADE' && (
-                <div>
-                  <label className="block text-xs font-medium text-zinc-700 mb-2">Quantidade (unidades)</label>
                   <div className="inline-flex items-center border border-zinc-300 rounded-lg overflow-hidden">
                     <button
                       type="button"
@@ -246,32 +190,33 @@ export function ProductModal({ product, config, onClose, onAddToCart }: ProductM
                     </button>
                   </div>
                 </div>
-              )}
-
-              {modoCompra === 'PESO_KG' && (
+              ) : (
                 <div className="space-y-3">
-                  <label className="block text-xs font-medium text-zinc-700">Selecione ou informe o peso (kg)</label>
+                  <div className="flex items-center gap-1.5 text-xs font-medium text-zinc-700">
+                    <Scale className="w-3.5 h-3.5 text-[#143824]" />
+                    <span>Selecione ou digite o peso desejado (kg)</span>
+                  </div>
                   <div className="flex flex-wrap gap-2">
-                    {[1, 2, 3, 5].map((preset) => (
+                    {[0.5, 1, 1.5, 2, 5].map((preset) => (
                       <button
                         key={preset}
                         type="button"
                         disabled={isOut || preset > product.estoque_quantidade}
                         onClick={() => setPesoKgInput(String(preset))}
-                        className={`px-3.5 py-2 text-xs font-semibold rounded-lg border transition-colors cursor-pointer disabled:opacity-40 ${
+                        className={`px-3 py-2 text-xs font-semibold rounded-lg border transition-colors cursor-pointer disabled:opacity-40 ${
                           Number(pesoKgInput.replace(',', '.')) === preset
                             ? 'bg-[#143824] text-white border-[#143824]'
                             : 'bg-white text-zinc-700 border-zinc-300 hover:border-[#143824]'
                         }`}
                       >
-                        {preset} kg
+                        {String(preset).replace('.', ',')} kg
                       </button>
                     ))}
                   </div>
                   <div className="flex items-center gap-2">
                     <input
                       type="number"
-                      step={precisao === 3 ? '0.001' : '0.1'}
+                      step="0.05"
                       min="0.05"
                       max={product.estoque_quantidade}
                       disabled={isOut}
@@ -279,49 +224,7 @@ export function ProductModal({ product, config, onClose, onAddToCart }: ProductM
                       onChange={(e) => setPesoKgInput(e.target.value)}
                       className="w-36 px-3 py-2 text-sm border border-zinc-300 rounded-lg font-mono-tabular focus:outline-none focus:ring-2 focus:ring-[#143824]"
                     />
-                    <span className="text-sm text-zinc-500">kg personalizado</span>
-                  </div>
-                </div>
-              )}
-
-              {modoCompra === 'VALOR_DINHEIRO' && (
-                <div className="space-y-3">
-                  <label className="block text-xs font-medium text-zinc-700">
-                    Quanto deseja gastar? (R$)
-                  </label>
-                  <div className="flex flex-wrap gap-2">
-                    {['20,00', '35,00', '50,00', '100,00'].map((val) => (
-                      <button
-                        key={val}
-                        type="button"
-                        disabled={isOut}
-                        onClick={() => setValorReaisInput(val)}
-                        className={`px-3 py-1.5 text-xs font-semibold rounded-lg border transition-colors cursor-pointer ${
-                          valorReaisInput === val
-                            ? 'bg-[#143824] text-white border-[#143824]'
-                            : 'bg-white text-zinc-700 border-zinc-300 hover:border-[#143824]'
-                        }`}
-                      >
-                        R$ {val}
-                      </button>
-                    ))}
-                  </div>
-                  <div className="flex items-center gap-2">
-                    <span className="text-sm font-medium text-zinc-600">R$</span>
-                    <input
-                      type="text"
-                      disabled={isOut}
-                      value={valorReaisInput}
-                      onChange={(e) => setValorReaisInput(e.target.value)}
-                      placeholder="50,00"
-                      className="w-36 px-3 py-2 text-sm border border-zinc-300 rounded-lg font-mono-tabular focus:outline-none focus:ring-2 focus:ring-[#143824]"
-                    />
-                  </div>
-                  <div className="p-3 rounded-lg bg-[#F5F2EB] text-xs text-zinc-700 flex items-center justify-between">
-                    <span>Quantidade equivalente calculada:</span>
-                    <strong className="font-mono-tabular text-sm text-[#143824]">
-                      {formatWeight(pesoCalculadoPorValor, precisao)} kg
-                    </strong>
+                    <span className="text-sm text-zinc-500">kg (aceita frações ex: 0.5, 1.5)</span>
                   </div>
                 </div>
               )}
@@ -350,7 +253,7 @@ export function ProductModal({ product, config, onClose, onAddToCart }: ProductM
 
             <div className="pt-4 border-t border-zinc-200 space-y-3">
               <div className="flex items-center justify-between text-sm">
-                <span className="text-zinc-600">Total do item</span>
+                <span className="text-zinc-600">Subtotal do item</span>
                 <span className="text-lg font-bold text-zinc-900 font-mono-tabular">
                   {formatBRL(subtotalCentavos)}
                 </span>

@@ -1,7 +1,7 @@
 import { useEffect, useState, type FormEvent } from 'react';
-import { X, MapPin, CreditCard, QrCode, Banknote, Copy, Check, AlertCircle, RefreshCw } from 'lucide-react';
+import { X, MapPin, CreditCard, QrCode, Banknote, Copy, Check, AlertCircle, RefreshCw, User as UserIcon } from 'lucide-react';
 import { apiFetch } from '../lib/api.ts';
-import { formatBRL, maskCEP, FINANCE_STATUS_LABEL } from '../lib/format.ts';
+import { formatBRL, maskCEP, maskPhone, FINANCE_STATUS_LABEL } from '../lib/format.ts';
 import type { Address, CartState, Order, PaymentRecord, PublicConfig, User } from '../types.ts';
 
 interface CheckoutModalProps {
@@ -19,6 +19,13 @@ declare global {
 }
 
 export function CheckoutModal({ cart, config, user, onClose, onOrderCreated }: CheckoutModalProps) {
+  const defaultName = user.nome_completo && !user.nome_completo.startsWith('Cliente ') ? user.nome_completo : '';
+  const [nomeDestinatario, setNomeDestinatario] = useState(defaultName);
+  const [telefoneContato, setTelefoneContato] = useState(user.telefone ? maskPhone(user.telefone) : '');
+  const [emailComprovante, setEmailComprovante] = useState(
+    user.email && !user.email.endsWith('.local') ? user.email : ''
+  );
+
   const [address, setAddress] = useState<Address>({
     cep: '',
     rua: '',
@@ -36,7 +43,7 @@ export function CheckoutModal({ cart, config, user, onClose, onOrderCreated }: C
 
   // Mercado Pago card fields (tokenized purely via MP JS SDK on client, never stored or sent raw)
   const [cardNumber, setCardNumber] = useState('');
-  const [cardName, setCardName] = useState(user.nome_completo.toUpperCase());
+  const [cardName, setCardName] = useState((defaultName || 'TITULAR DO CARTAO').toUpperCase());
   const [cardExpMonth, setCardExpMonth] = useState('');
   const [cardExpYear, setCardExpYear] = useState('');
   const [cardCvv, setCardCvv] = useState('');
@@ -46,14 +53,12 @@ export function CheckoutModal({ cart, config, user, onClose, onOrderCreated }: C
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // Result state after creating order
   const [createdOrder, setCreatedOrder] = useState<Order | null>(null);
   const [createdPayment, setCreatedPayment] = useState<PaymentRecord | null>(null);
   const [paymentNotice, setPaymentNotice] = useState<string | null>(null);
   const [copiedPix, setCopiedPix] = useState(false);
   const [checkingPayment, setCheckingPayment] = useState(false);
 
-  // Load saved address if available
   useEffect(() => {
     apiFetch<Address[]>('/api/enderecos')
       .then((rows) => {
@@ -72,7 +77,6 @@ export function CheckoutModal({ cart, config, user, onClose, onOrderCreated }: C
       .catch(() => {});
   }, []);
 
-  // Load Mercado Pago JS SDK v2 when public key exists
   useEffect(() => {
     if (!config.mercado_pago_public_key || window.MercadoPago) return;
     const script = document.createElement('script');
@@ -81,7 +85,6 @@ export function CheckoutModal({ cart, config, user, onClose, onOrderCreated }: C
     document.body.appendChild(script);
   }, [config.mercado_pago_public_key]);
 
-  // Detect card brand/issuer via Mercado Pago when card BIN (6+ digits) is entered
   useEffect(() => {
     const bin = cardNumber.replace(/\D/g, '');
     if (formaPagamento !== 'CARTAO_CREDITO' || bin.length < 6 || !config.mercado_pago_configurado) {
@@ -124,8 +127,16 @@ export function CheckoutModal({ cart, config, user, onClose, onOrderCreated }: C
   async function handleFinalizeOrder(e: FormEvent) {
     e.preventDefault();
     setError(null);
-    setSubmitting(true);
+    if (nomeDestinatario.trim().length < 3) {
+      setError('Informe o nome completo de quem vai receber o pedido.');
+      return;
+    }
+    if (telefoneContato.replace(/\D/g, '').length < 10) {
+      setError('Informe um telefone/WhatsApp válido com DDD para contato da entrega.');
+      return;
+    }
 
+    setSubmitting(true);
     try {
       let cardPayment: any = undefined;
 
@@ -168,7 +179,13 @@ export function CheckoutModal({ cart, config, user, onClose, onOrderCreated }: C
       }>('/api/pedidos', {
         method: 'POST',
         body: JSON.stringify({
-          endereco: { ...address, cep: address.cep.replace(/\D/g, '') },
+          endereco: {
+            ...address,
+            cep: address.cep.replace(/\D/g, ''),
+            nome_destinatario: nomeDestinatario.trim(),
+            telefone_contato: telefoneContato.replace(/\D/g, ''),
+            email_comprovante: emailComprovante.trim() || undefined,
+          },
           formaPagamento,
           parcelas: 1,
           observacoes,
@@ -230,7 +247,7 @@ export function CheckoutModal({ cart, config, user, onClose, onOrderCreated }: C
                 </p>
               </div>
               <div className="text-right">
-                <p className="text-xs text-zinc-600">Valor total</p>
+                <p className="text-xs text-zinc-600">Valor total (com frete R$ 4,99)</p>
                 <p className="text-lg font-bold text-[#143824] font-mono-tabular">
                   {formatBRL(createdOrder.total_centavos)}
                 </p>
@@ -302,7 +319,7 @@ export function CheckoutModal({ cart, config, user, onClose, onOrderCreated }: C
                 onClick={onClose}
                 className="px-5 py-2.5 bg-[#143824] text-white text-sm font-semibold rounded-lg cursor-pointer"
               >
-                Acompanhar em Meus Pedidos
+                Concluir
               </button>
             </div>
           </div>
@@ -315,8 +332,49 @@ export function CheckoutModal({ cart, config, user, onClose, onOrderCreated }: C
               </div>
             )}
 
-            {/* Step 1: Delivery Address with ViaCEP */}
             <section className="space-y-3">
+              <div className="flex items-center gap-2 text-sm font-semibold text-zinc-900">
+                <UserIcon className="w-4 h-4 text-[#143824]" />
+                <h3>Dados de contato para entrega</h3>
+              </div>
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                <div>
+                  <label className="block text-xs font-medium text-zinc-700 mb-1">Nome completo</label>
+                  <input
+                    type="text"
+                    required
+                    placeholder="Quem irá receber"
+                    value={nomeDestinatario}
+                    onChange={(e) => setNomeDestinatario(e.target.value)}
+                    className="w-full px-3 py-2 text-sm border border-zinc-300 rounded-lg"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-zinc-700 mb-1">Telefone / WhatsApp</label>
+                  <input
+                    type="text"
+                    required
+                    inputMode="numeric"
+                    placeholder="(00) 90000-0000"
+                    value={telefoneContato}
+                    onChange={(e) => setTelefoneContato(maskPhone(e.target.value))}
+                    className="w-full px-3 py-2 text-sm border border-zinc-300 rounded-lg font-mono-tabular"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-zinc-700 mb-1">E-mail (comprovante)</label>
+                  <input
+                    type="email"
+                    placeholder="Opcional"
+                    value={emailComprovante}
+                    onChange={(e) => setEmailComprovante(e.target.value)}
+                    className="w-full px-3 py-2 text-sm border border-zinc-300 rounded-lg"
+                  />
+                </div>
+              </div>
+            </section>
+
+            <section className="space-y-3 pt-4 border-t border-zinc-200">
               <div className="flex items-center gap-2 text-sm font-semibold text-zinc-900">
                 <MapPin className="w-4 h-4 text-[#143824]" />
                 <h3>Endereço de entrega</h3>
@@ -405,7 +463,6 @@ export function CheckoutModal({ cart, config, user, onClose, onOrderCreated }: C
               </div>
             </section>
 
-            {/* Step 2: Payment Method */}
             <section className="space-y-3 pt-4 border-t border-zinc-200">
               <h3 className="text-sm font-semibold text-zinc-900">Forma de pagamento</h3>
               <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
@@ -541,19 +598,18 @@ export function CheckoutModal({ cart, config, user, onClose, onOrderCreated }: C
               />
             </div>
 
-            {/* Order Totals Summary */}
             <div className="p-4 rounded-lg bg-[#F5F2EB] space-y-1.5 text-sm">
               <div className="flex justify-between text-zinc-600">
                 <span>Produtos ({cart.itens.length})</span>
                 <span className="font-mono-tabular">{formatBRL(cart.subtotal_centavos)}</span>
               </div>
               <div className="flex justify-between text-zinc-600">
-                <span>Frete</span>
-                <span className="font-mono-tabular">{formatBRL(cart.frete_centavos)}</span>
+                <span>Frete fixo obrigatório</span>
+                <span className="font-mono-tabular">{formatBRL(499)}</span>
               </div>
               <div className="pt-2 border-t border-zinc-300 flex justify-between font-bold text-zinc-900 text-base">
                 <span>Total a pagar</span>
-                <span className="font-mono-tabular text-[#143824]">{formatBRL(cart.total_centavos)}</span>
+                <span className="font-mono-tabular text-[#143824]">{formatBRL(cart.subtotal_centavos + 499)}</span>
               </div>
             </div>
 

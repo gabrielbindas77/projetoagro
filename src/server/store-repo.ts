@@ -3,79 +3,94 @@ import fs from 'fs';
 import path from 'path';
 import bcrypt from 'bcryptjs';
 import { db, getStoreConfig as getSqliteConfig, uploadsDir } from './db.ts';
-import { getSupabaseAdmin, isSupabaseConfigured, ensureSupabaseAdminBootstrap } from './supabase.ts';
+import {
+  ADMIN_MASTER_CPF,
+  cpfToAuthEmail,
+  createEphemeralSupabaseClient,
+  ensureSupabaseAdminBootstrap,
+  getSupabaseAdmin,
+  isSupabaseConfigured,
+  resolveSupabaseUrl,
+} from './supabase.ts';
 import { cleanDigits, normalizeText } from './utils.ts';
 
 function boolNum(val: any): number {
   return val === true || val === 1 ? 1 : 0;
 }
 
+function resolveUnitType(input: any): 'kg' | 'un' {
+  if (input === 'kg' || input === 'PESO_KG' || input === 'KG' || input === 'PESO_E_VALOR' || input === 'VALOR_DINHEIRO') {
+    return 'kg';
+  }
+  return 'un';
+}
+
 export async function getConfigMap(): Promise<Record<string, string>> {
   const sb = getSupabaseAdmin();
   if (sb) {
-    const [{ data, error }, adminSettingsRes] = await Promise.all([
-      sb.from('configuracoes_loja').select('chave, valor'),
-      sb.from('admin_settings').select('pix_key, pix_key_type, pix_recipient_name, shipping_fee').eq('id', 1).maybeSingle(),
-    ]);
-    if (!error && data) {
-      const map: Record<string, string> = {};
-      for (const r of data) map[r.chave] = r.valor;
-      if (adminSettingsRes.data) {
-        if (adminSettingsRes.data.pix_key !== undefined) map.pix_key = adminSettingsRes.data.pix_key || '';
-        if (adminSettingsRes.data.pix_key_type) map.pix_key_type = adminSettingsRes.data.pix_key_type;
-        if (adminSettingsRes.data.pix_recipient_name) map.pix_recipient_name = adminSettingsRes.data.pix_recipient_name;
-        if (adminSettingsRes.data.shipping_fee !== undefined && adminSettingsRes.data.shipping_fee !== null) {
-          map.frete_padrao_centavos = String(Math.round(Number(adminSettingsRes.data.shipping_fee) * 100));
-        }
-      }
-      return map;
-    }
+    const { data: adm } = await sb
+      .from('admin_settings')
+      .select('pix_key, pix_key_type, pix_recipient_name, shipping_fee, whatsapp_loja, exibir_esgotados_catalogo')
+      .eq('id', 1)
+      .maybeSingle();
+
+    return {
+      frete_padrao_centavos: '499',
+      max_parcelas: '1',
+      parcelas_sem_juros: '1',
+      taxa_juros_mensal: '0',
+      exibir_esgotados_catalogo: adm?.exibir_esgotados_catalogo === false ? 'false' : 'true',
+      whatsapp_loja: adm?.whatsapp_loja || process.env.STORE_WHATSAPP_NUMBER || '5511999999999',
+      precisao_pesagem_padrao: '3',
+      pix_key: adm?.pix_key || '',
+      pix_key_type: adm?.pix_key_type || 'CPF',
+      pix_recipient_name: adm?.pix_recipient_name || 'Agro Marconato Agropecuária',
+    };
   }
-  return getSqliteConfig();
+  const sqliteCfg = getSqliteConfig();
+  sqliteCfg.frete_padrao_centavos = '499';
+  return sqliteCfg;
 }
 
 export async function updateConfigMap(entries: Record<string, string>) {
   const sb = getSupabaseAdmin();
   if (sb) {
-    const rows = Object.entries(entries).map(([chave, valor]) => ({
-      chave,
-      valor: String(valor),
-      atualizado_em: new Date().toISOString(),
-    }));
-    const { error } = await sb.from('configuracoes_loja').upsert(rows, { onConflict: 'chave' });
-    if (error) throw new Error(error.message);
-
-    // Mirror PIX and shipping settings into public.admin_settings if table exists
     const current = await getConfigMap();
-    const freteCentavos = Number(entries.frete_padrao_centavos ?? current.frete_padrao_centavos ?? 499);
-    await sb
-      .from('admin_settings')
-      .upsert(
-        {
-          id: 1,
-          pix_key: entries.pix_key ?? current.pix_key ?? '',
-          pix_key_type: entries.pix_key_type ?? current.pix_key_type ?? 'CPF',
-          pix_recipient_name: entries.pix_recipient_name ?? current.pix_recipient_name ?? 'Agro Marconato Agropecuária',
-          shipping_fee: Number((freteCentavos / 100).toFixed(2)),
-          updated_at: new Date().toISOString(),
-        },
-        { onConflict: 'id' }
-      )
-      .then(() => undefined, () => undefined);
-
+    const { error } = await sb.from('admin_settings').upsert(
+      {
+        id: 1,
+        pix_key: entries.pix_key !== undefined ? entries.pix_key : current.pix_key,
+        pix_key_type: entries.pix_key_type !== undefined ? entries.pix_key_type : current.pix_key_type || 'CPF',
+        pix_recipient_name:
+          entries.pix_recipient_name !== undefined ? entries.pix_recipient_name : current.pix_recipient_name,
+        shipping_fee: 4.99,
+        whatsapp_loja: entries.whatsapp_loja !== undefined ? entries.whatsapp_loja : current.whatsapp_loja,
+        exibir_esgotados_catalogo:
+          entries.exibir_esgotados_catalogo !== undefined
+            ? entries.exibir_esgotados_catalogo !== 'false'
+            : current.exibir_esgotados_catalogo !== 'false',
+        updated_at: new Date().toISOString(),
+      },
+      { onConflict: 'id' }
+    );
+    if (error) throw new Error(error.message);
     return getConfigMap();
   }
+
   const upsert = db.prepare(`
     INSERT INTO configuracoes_loja (chave, valor, atualizado_em)
     VALUES (?, ?, datetime('now'))
     ON CONFLICT(chave) DO UPDATE SET valor = excluded.valor, atualizado_em = datetime('now')
   `);
-  for (const [k, v] of Object.entries(entries)) upsert.run(k, String(v));
-  return getSqliteConfig();
+  for (const [k, v] of Object.entries(entries)) {
+    upsert.run(k, k === 'frete_padrao_centavos' ? '499' : String(v));
+  }
+  upsert.run('frete_padrao_centavos', '499');
+  return getConfigMap();
 }
 
 // ==============================================================================
-// AUTH & RATE LIMIT
+// AUTH & RATE LIMIT (Unified CPF + Password, strictly 1 registration per CPF)
 // ==============================================================================
 
 export async function checkRateLimit(key: string): Promise<{ allowed: boolean; minutesRemaining?: number }> {
@@ -142,113 +157,255 @@ export async function clearFailedAttempts(key: string) {
 }
 
 export async function findUserByCpfOrEmail(cpf: string, email: string) {
+  const clean = cleanDigits(cpf);
   const sb = getSupabaseAdmin();
   if (sb) {
-    const [c1, a1, c2, a2] = await Promise.all([
-      sb.from('clientes').select('id').eq('cpf', cpf).maybeSingle(),
-      sb.from('administradores').select('id').eq('cpf', cpf).maybeSingle(),
-      sb.from('clientes').select('id').eq('email', email).maybeSingle(),
-      sb.from('administradores').select('id').eq('email', email).maybeSingle(),
-    ]);
+    const { data: prof } = await sb.from('profiles').select('id').eq('cpf', clean).maybeSingle();
     return {
-      cpfExists: Boolean(c1.data || a1.data),
-      emailExists: Boolean(c2.data || a2.data),
+      cpfExists: Boolean(prof),
+      emailExists: false,
     };
   }
   const existingCpf = db
     .prepare(`SELECT id FROM clientes WHERE cpf = ? UNION SELECT id FROM administradores WHERE cpf = ?`)
-    .get(cpf, cpf);
-  const existingEmail = db
-    .prepare(`SELECT id FROM clientes WHERE email = ? UNION SELECT id FROM administradores WHERE email = ?`)
-    .get(email, email);
+    .get(clean, clean);
+  const existingEmail = email
+    ? db
+        .prepare(`SELECT id FROM clientes WHERE email = ? UNION SELECT id FROM administradores WHERE email = ?`)
+        .get(email, email)
+    : null;
   return { cpfExists: Boolean(existingCpf), emailExists: Boolean(existingEmail) };
 }
 
-export async function createCliente(input: {
-  nome_completo: string;
+export async function registerUserByCpfPassword(input: {
   cpf: string;
-  email: string;
-  telefone: string;
-  senha_hash: string;
-  identidade_verificada: boolean;
+  senha: string;
+  nome_completo?: string;
+  telefone?: string;
 }) {
-  const sb = getSupabaseAdmin();
-  if (sb) {
-    const { data, error } = await sb
-      .from('clientes')
-      .insert({
-        nome_completo: input.nome_completo,
-        cpf: input.cpf,
-        email: input.email,
-        telefone: input.telefone,
-        senha_hash: input.senha_hash,
-        identidade_verificada: input.identidade_verificada,
-        papel: 'CLIENTE',
-      })
-      .select('*')
-      .single();
-    if (error) throw new Error(error.message);
-    return data;
-  }
+  const cpf = cleanDigits(input.cpf);
+  const authEmail = cpfToAuthEmail(cpf);
+  const fullName = String(input.nome_completo || '').trim() || `Cliente ${cpf.slice(-4)}`;
+  const phone = cleanDigits(input.telefone || '');
+  const isAdmin = cpf === ADMIN_MASTER_CPF;
 
-  const id = crypto.randomUUID();
-  db.prepare(`
-    INSERT INTO clientes (id, nome_completo, cpf, email, telefone, senha_hash, email_verificado, telefone_verificado, identidade_verificada, papel)
-    VALUES (?, ?, ?, ?, ?, ?, 0, 0, ?, 'CLIENTE')
-  `).run(id, input.nome_completo, input.cpf, input.email, input.telefone, input.senha_hash, input.identidade_verificada ? 1 : 0);
-  return db.prepare(`SELECT * FROM clientes WHERE id = ?`).get(id);
-}
-
-export async function findAuthAccountByCpf(cpf: string): Promise<{ account: any; papel: 'ADMIN' | 'CLIENTE' } | null> {
   const sb = getSupabaseAdmin();
   if (sb) {
     await ensureSupabaseAdminBootstrap();
-    const { data: admin } = await sb
-      .from('administradores')
-      .select('*')
-      .eq('cpf', cpf)
-      .eq('ativo', true)
-      .maybeSingle();
-    if (admin) return { account: admin, papel: 'ADMIN' };
+    const { data: existingProf } = await sb.from('profiles').select('id').eq('cpf', cpf).maybeSingle();
+    if (existingProf) {
+      throw new Error('Este CPF já está cadastrado no sistema.');
+    }
 
-    const { data: cliente } = await sb.from('clientes').select('*').eq('cpf', cpf).maybeSingle();
-    if (cliente) return { account: cliente, papel: 'CLIENTE' };
-    return null;
+    const { data: created, error } = await sb.auth.admin.createUser({
+      email: authEmail,
+      password: input.senha,
+      email_confirm: true,
+      user_metadata: {
+        cpf,
+        full_name: fullName,
+        phone,
+      },
+    });
+
+    if (error) {
+      if (error.message.toLowerCase().includes('already') || error.message.toLowerCase().includes('registered')) {
+        throw new Error('Este CPF já está cadastrado no sistema.');
+      }
+      throw new Error(error.message);
+    }
+
+    const userId = created.user.id;
+    const { data: profile, error: profErr } = await sb
+      .from('profiles')
+      .upsert(
+        {
+          id: userId,
+          cpf,
+          full_name: fullName,
+          phone,
+          email: authEmail,
+          is_admin: isAdmin,
+        },
+        { onConflict: 'id' }
+      )
+      .select('*')
+      .single();
+
+    if (profErr) throw new Error(profErr.message);
+
+    return {
+      id: profile.id,
+      nome_completo: profile.full_name || fullName,
+      cpf: profile.cpf,
+      email: profile.email || authEmail,
+      telefone: profile.phone || phone,
+      is_admin: Boolean(profile.is_admin),
+      papel: profile.is_admin ? ('ADMIN' as const) : ('CLIENTE' as const),
+    };
   }
 
+  // Local SQLite fallback
+  const dup = await findUserByCpfOrEmail(cpf, authEmail);
+  if (dup.cpfExists) {
+    throw new Error('Este CPF já está cadastrado no sistema.');
+  }
+
+  const hash = bcrypt.hashSync(input.senha, 10);
+  const id = crypto.randomUUID();
+  db.prepare(`
+    INSERT INTO clientes (id, nome_completo, cpf, email, telefone, senha_hash, email_verificado, telefone_verificado, identidade_verificada, papel)
+    VALUES (?, ?, ?, ?, ?, ?, 1, 1, 1, 'CLIENTE')
+  `).run(id, fullName, cpf, authEmail, phone, hash);
+
+  return {
+    id,
+    nome_completo: fullName,
+    cpf,
+    email: authEmail,
+    telefone: phone,
+    is_admin: false,
+    papel: 'CLIENTE' as const,
+  };
+}
+
+export async function authenticateUserByCpfPassword(cpfRaw: string, senha: string) {
+  const cpf = cleanDigits(cpfRaw);
+  const authEmail = cpfToAuthEmail(cpf);
+  const sb = getSupabaseAdmin();
+
+  if (sb) {
+    await ensureSupabaseAdminBootstrap();
+    const ephemeral = createEphemeralSupabaseClient();
+    if (!ephemeral) return null;
+
+    const { data: signInData, error: signInErr } = await ephemeral.auth.signInWithPassword({
+      email: authEmail,
+      password: senha,
+    });
+
+    if (signInErr || !signInData.user) {
+      return null;
+    }
+
+    const userId = signInData.user.id;
+    let { data: profile } = await sb.from('profiles').select('*').eq('id', userId).maybeSingle();
+
+    if (!profile) {
+      const isAdmin = cpf === ADMIN_MASTER_CPF;
+      const { data: inserted } = await sb
+        .from('profiles')
+        .upsert(
+          {
+            id: userId,
+            cpf,
+            full_name: isAdmin ? 'Administrador Agro Marconato' : `Cliente ${cpf.slice(-4)}`,
+            email: authEmail,
+            is_admin: isAdmin,
+          },
+          { onConflict: 'id' }
+        )
+        .select('*')
+        .single();
+      profile = inserted;
+    }
+
+    const isAdmin = Boolean(profile?.is_admin || cpf === ADMIN_MASTER_CPF);
+    return {
+      id: userId,
+      nome_completo: profile?.full_name || (isAdmin ? 'Administrador Agro Marconato' : `Cliente ${cpf.slice(-4)}`),
+      cpf,
+      email: profile?.email || authEmail,
+      telefone: profile?.phone || '',
+      is_admin: isAdmin,
+      papel: isAdmin ? ('ADMIN' as const) : ('CLIENTE' as const),
+    };
+  }
+
+  // Local SQLite fallback
   const admin = db.prepare(`SELECT * FROM administradores WHERE cpf = ? AND ativo = 1`).get(cpf) as any;
-  if (admin) return { account: admin, papel: 'ADMIN' };
+  if (admin && bcrypt.compareSync(senha, admin.senha_hash)) {
+    return {
+      id: admin.id,
+      nome_completo: admin.nome_completo,
+      cpf: admin.cpf,
+      email: admin.email,
+      telefone: admin.telefone || '',
+      is_admin: true,
+      papel: 'ADMIN' as const,
+    };
+  }
+
   const cliente = db.prepare(`SELECT * FROM clientes WHERE cpf = ?`).get(cpf) as any;
-  if (cliente) return { account: cliente, papel: 'CLIENTE' };
+  if (cliente && bcrypt.compareSync(senha, cliente.senha_hash)) {
+    const isAdmin = cpf === ADMIN_MASTER_CPF;
+    return {
+      id: cliente.id,
+      nome_completo: cliente.nome_completo,
+      cpf: cliente.cpf,
+      email: cliente.email,
+      telefone: cliente.telefone || '',
+      is_admin: isAdmin,
+      papel: isAdmin ? ('ADMIN' as const) : ('CLIENTE' as const),
+    };
+  }
+
+  return null;
+}
+
+export async function findAuthAccountByCpf(cpf: string): Promise<{ account: any; papel: 'ADMIN' | 'CLIENTE' } | null> {
+  const clean = cleanDigits(cpf);
+  const sb = getSupabaseAdmin();
+  if (sb) {
+    const { data: profile } = await sb.from('profiles').select('*').eq('cpf', clean).maybeSingle();
+    if (!profile) return null;
+    const isAdmin = Boolean(profile.is_admin || clean === ADMIN_MASTER_CPF);
+    return {
+      account: {
+        id: profile.id,
+        nome_completo: profile.full_name,
+        cpf: profile.cpf,
+        email: profile.email,
+        telefone: profile.phone,
+        is_admin: isAdmin,
+      },
+      papel: isAdmin ? 'ADMIN' : 'CLIENTE',
+    };
+  }
+
+  const admin = db.prepare(`SELECT * FROM administradores WHERE cpf = ? AND ativo = 1`).get(clean) as any;
+  if (admin) return { account: { ...admin, is_admin: true }, papel: 'ADMIN' };
+  const cliente = db.prepare(`SELECT * FROM clientes WHERE cpf = ?`).get(clean) as any;
+  if (cliente) return { account: { ...cliente, is_admin: clean === ADMIN_MASTER_CPF }, papel: clean === ADMIN_MASTER_CPF ? 'ADMIN' : 'CLIENTE' };
   return null;
 }
 
 export async function getUserProfileById(id: string, papel: 'ADMIN' | 'CLIENTE') {
   const sb = getSupabaseAdmin();
   if (sb) {
-    if (papel === 'ADMIN') {
-      const { data } = await sb
-        .from('administradores')
-        .select('id, nome_completo, cpf, email, telefone, papel')
-        .eq('id', id)
-        .eq('ativo', true)
-        .maybeSingle();
-      return data || null;
-    }
-    const { data } = await sb
-      .from('clientes')
-      .select('id, nome_completo, cpf, email, telefone, papel, email_verificado, telefone_verificado, identidade_verificada')
-      .eq('id', id)
-      .maybeSingle();
-    return data || null;
+    const { data: profile } = await sb.from('profiles').select('*').eq('id', id).maybeSingle();
+    if (!profile) return null;
+    const isAdmin = Boolean(profile.is_admin || profile.cpf === ADMIN_MASTER_CPF);
+    return {
+      id: profile.id,
+      nome_completo: profile.full_name || `Cliente ${String(profile.cpf).slice(-4)}`,
+      cpf: profile.cpf,
+      email: profile.email || cpfToAuthEmail(profile.cpf),
+      telefone: profile.phone || '',
+      is_admin: isAdmin,
+      papel: isAdmin ? ('ADMIN' as const) : ('CLIENTE' as const),
+      email_verificado: true,
+      telefone_verificado: true,
+      identidade_verificada: true,
+    };
   }
 
   if (papel === 'ADMIN') {
-    return (
-      db
-        .prepare(`SELECT id, nome_completo, cpf, email, telefone, papel FROM administradores WHERE id = ? AND ativo = 1`)
-        .get(id) || null
-    );
+    const adm = db
+      .prepare(`SELECT id, nome_completo, cpf, email, telefone, papel FROM administradores WHERE id = ? AND ativo = 1`)
+      .get(id) as any;
+    if (!adm) return null;
+    return { ...adm, is_admin: true, papel: 'ADMIN' as const };
   }
   const cliente = db
     .prepare(
@@ -256,83 +413,40 @@ export async function getUserProfileById(id: string, papel: 'ADMIN' | 'CLIENTE')
     )
     .get(id) as any;
   if (!cliente) return null;
+  const isAdmin = cliente.cpf === ADMIN_MASTER_CPF;
   return {
     ...cliente,
-    email_verificado: cliente.email_verificado === 1,
-    telefone_verificado: cliente.telefone_verificado === 1,
-    identidade_verificada: cliente.identidade_verificada === 1,
+    is_admin: isAdmin,
+    papel: isAdmin ? ('ADMIN' as const) : ('CLIENTE' as const),
+    email_verificado: true,
+    telefone_verificado: true,
+    identidade_verificada: true,
   };
 }
 
-export async function saveVerificationCode(alvo: string, tipo: string, codigoHash: string, expiraEm: string) {
+export async function updateProfileContactInfo(
+  userId: string,
+  info: { full_name?: string; phone?: string }
+) {
+  const name = info.full_name ? String(info.full_name).trim() : undefined;
+  const phone = info.phone ? cleanDigits(info.phone) : undefined;
+  if (!name && !phone) return;
+
   const sb = getSupabaseAdmin();
   if (sb) {
-    await sb.from('codigos_verificacao').insert({ alvo, tipo, codigo_hash: codigoHash, expira_em: expiraEm });
+    const patch: any = { updated_at: new Date().toISOString() };
+    if (name) patch.full_name = name;
+    if (phone) patch.phone = phone;
+    await sb.from('profiles').update(patch).eq('id', userId);
     return;
   }
-  db.prepare(`
-    INSERT INTO codigos_verificacao (id, alvo, tipo, codigo_hash, expira_em)
-    VALUES (?, ?, ?, ?, ?)
-  `).run(crypto.randomUUID(), alvo, tipo, codigoHash, expiraEm);
-}
 
-export async function verifyAndConsumeCode(alvo: string, tipo: string, codigoHash: string): Promise<{ ok: boolean; error?: string }> {
-  const sb = getSupabaseAdmin();
-  if (sb) {
-    const { data } = await sb
-      .from('codigos_verificacao')
-      .select('*')
-      .eq('alvo', alvo)
-      .eq('tipo', tipo)
-      .eq('usado', false)
-      .order('criado_em', { ascending: false })
-      .limit(1)
-      .maybeSingle();
-
-    if (!data) return { ok: false, error: 'Nenhum código ativo encontrado. Solicite um novo envio.' };
-    if (new Date(data.expira_em).getTime() < Date.now()) return { ok: false, error: 'Código expirado.' };
-    if (data.codigo_hash !== codigoHash) return { ok: false, error: 'Código incorreto.' };
-
-    await sb.from('codigos_verificacao').update({ usado: true }).eq('id', data.id);
-    return { ok: true };
+  if (name) {
+    db.prepare(`UPDATE clientes SET nome_completo = ?, atualizado_em = datetime('now') WHERE id = ?`).run(name, userId);
   }
-
-  const row = db
-    .prepare(`
-      SELECT id, codigo_hash, expira_em FROM codigos_verificacao
-      WHERE alvo = ? AND tipo = ? AND usado = 0
-      ORDER BY criado_em DESC LIMIT 1
-    `)
-    .get(alvo, tipo) as { id: string; codigo_hash: string; expira_em: string } | undefined;
-
-  if (!row) return { ok: false, error: 'Nenhum código ativo encontrado. Solicite um novo envio.' };
-  if (new Date(row.expira_em).getTime() < Date.now()) return { ok: false, error: 'Código expirado.' };
-  if (row.codigo_hash !== codigoHash) return { ok: false, error: 'Código incorreto.' };
-  db.prepare(`UPDATE codigos_verificacao SET usado = 1 WHERE id = ?`).run(row.id);
-  return { ok: true };
-}
-
-export async function markClienteVerified(clienteId: string, field: 'EMAIL' | 'TELEFONE') {
-  const sb = getSupabaseAdmin();
-  if (sb) {
-    const patch = field === 'EMAIL' ? { email_verificado: true } : { telefone_verificado: true };
-    await sb.from('clientes').update({ ...patch, atualizado_em: new Date().toISOString() }).eq('id', clienteId);
-    return;
+  if (phone) {
+    db.prepare(`UPDATE clientes SET telefone = ?, atualizado_em = datetime('now') WHERE id = ?`).run(phone, userId);
   }
-  if (field === 'EMAIL') {
-    db.prepare(`UPDATE clientes SET email_verificado = 1, atualizado_em = datetime('now') WHERE id = ?`).run(clienteId);
-  } else {
-    db.prepare(`UPDATE clientes SET telefone_verificado = 1, atualizado_em = datetime('now') WHERE id = ?`).run(clienteId);
-  }
-}
-
-export async function updateClientePasswordByCpf(cpf: string, senhaHash: string) {
-  const sb = getSupabaseAdmin();
-  if (sb) {
-    await sb.from('clientes').update({ senha_hash: senhaHash, atualizado_em: new Date().toISOString() }).eq('cpf', cpf);
-    return;
-  }
-  db.prepare(`UPDATE clientes SET senha_hash = ?, atualizado_em = datetime('now') WHERE cpf = ?`).run(senhaHash, cpf);
 }
 
 // ==============================================================================
@@ -342,7 +456,11 @@ export async function updateClientePasswordByCpf(cpf: string, senhaHash: string)
 export async function listCategorias() {
   const sb = getSupabaseAdmin();
   if (sb) {
-    const { data, error } = await sb.from('categorias').select('*').order('ordem', { ascending: true }).order('nome', { ascending: true });
+    const { data, error } = await sb
+      .from('categorias')
+      .select('*')
+      .order('ordem', { ascending: true })
+      .order('nome', { ascending: true });
     if (error) throw new Error(error.message);
     return data || [];
   }
@@ -374,17 +492,77 @@ function getEffectivePriceCentavos(produto: any): number {
   return Number(produto.preco_centavos);
 }
 
-function normalizeProductRow(p: any, catName?: string, catSlug?: string, imgs: any[] = []) {
+function mapSupabaseProductRow(p: any) {
+  const unitType: 'kg' | 'un' = p.unit_type === 'kg' ? 'kg' : 'un';
+  const precoCentavos = Math.round(Number(p.price || 0) * 100);
+  const promoCentavos = p.promo_price !== null && p.promo_price !== undefined ? Math.round(Number(p.promo_price) * 100) : null;
+  const stock = Number(p.stock || 0);
+  const situacao = !p.active ? 'INATIVO' : stock <= 0 ? 'ESGOTADO' : 'DISPONIVEL';
+  const galleryRaw = Array.isArray(p.gallery_urls) ? p.gallery_urls : [];
+  const urls: string[] = [];
+  if (p.image_url) urls.push(p.image_url);
+  for (const u of galleryRaw) {
+    if (typeof u === 'string' && u && !urls.includes(u)) urls.push(u);
+  }
+
+  const imagens = urls.map((url, idx) => ({
+    id: `${p.id}::img::${idx}`,
+    produto_id: p.id,
+    url,
+    nome_arquivo: url.split('/').pop() || null,
+    principal: idx === 0 ? 1 : 0,
+    ordem: idx,
+  }));
+
+  const onSale = Boolean(p.on_sale);
+  const effectiveCentavos =
+    onSale && promoCentavos !== null && promoCentavos > 0 ? promoCentavos : precoCentavos;
+
+  return {
+    id: p.id,
+    categoria_id: p.category_id || '',
+    categoria_nome: p.categorias?.nome || 'Agropecuária',
+    categoria_slug: p.categorias?.slug || '',
+    nome: p.name,
+    nome_normalizado: p.name_normalized || normalizeText(p.name || ''),
+    descricao_completa: p.description || '',
+    observacao_curta: p.short_description || '',
+    palavras_chave: p.keywords || '',
+    palavras_chave_normalizadas: p.keywords_normalized || normalizeText(p.keywords || ''),
+    unit_type: unitType,
+    preco_centavos: precoCentavos,
+    preco_promocional_centavos: promoCentavos,
+    preco_vigente_centavos: effectiveCentavos,
+    estoque_quantidade: stock,
+    estoque_baixo_limite: Number(p.low_stock_limit ?? 5),
+    unidade_venda: unitType === 'kg' ? 'KG' : 'UN',
+    modalidade_venda: unitType === 'kg' ? ('PESO_KG' as const) : ('UNIDADE' as const),
+    precisao_pesagem: unitType === 'kg' ? 3 : 0,
+    permite_parcelamento: 0,
+    max_parcelas_produto: 1,
+    situacao,
+    destaque: p.featured ? 1 : 0,
+    oferta: onSale ? 1 : 0,
+    imagem_principal: urls[0] || null,
+    imagens,
+  };
+}
+
+function normalizeSqliteProductRow(p: any, catName?: string, catSlug?: string, imgs: any[] = []) {
   const primary = imgs.find((i) => boolNum(i.principal) === 1) || imgs[0] || null;
+  const unitType = resolveUnitType(p.modalidade_venda);
   return {
     ...p,
+    unit_type: unitType,
+    unidade_venda: unitType === 'kg' ? 'KG' : 'UN',
+    modalidade_venda: unitType === 'kg' ? 'PESO_KG' : 'UNIDADE',
+    precisao_pesagem: unitType === 'kg' ? 3 : 0,
     preco_centavos: Number(p.preco_centavos),
     preco_promocional_centavos: p.preco_promocional_centavos !== null ? Number(p.preco_promocional_centavos) : null,
     estoque_quantidade: Number(p.estoque_quantidade),
     estoque_baixo_limite: Number(p.estoque_baixo_limite),
-    precisao_pesagem: Number(p.precisao_pesagem),
-    permite_parcelamento: boolNum(p.permite_parcelamento),
-    max_parcelas_produto: Number(p.max_parcelas_produto),
+    permite_parcelamento: 0,
+    max_parcelas_produto: 1,
     destaque: boolNum(p.destaque),
     oferta: boolNum(p.oferta),
     categoria_nome: catName ?? p.categoria_nome,
@@ -398,27 +576,15 @@ function normalizeProductRow(p: any, catName?: string, catSlug?: string, imgs: a
 export async function listProdutos(includeInactive = false) {
   const sb = getSupabaseAdmin();
   if (sb) {
-    let q = sb.from('produtos').select('*, categorias(nome, slug)').order('destaque', { ascending: false }).order('criado_em', { ascending: false });
-    if (!includeInactive) q = q.neq('situacao', 'INATIVO');
-    const { data: prods, error } = await q;
+    let q = sb
+      .from('products')
+      .select('*, categorias(nome, slug)')
+      .order('featured', { ascending: false })
+      .order('created_at', { ascending: false });
+    if (!includeInactive) q = q.eq('active', true);
+    const { data, error } = await q;
     if (error) throw new Error(error.message);
-
-    const { data: imgs } = await sb
-      .from('imagens_produtos')
-      .select('*')
-      .order('principal', { ascending: false })
-      .order('ordem', { ascending: true });
-
-    const byProd = new Map<string, any[]>();
-    for (const img of imgs || []) {
-      const arr = byProd.get(img.produto_id) || [];
-      arr.push(img);
-      byProd.set(img.produto_id, arr);
-    }
-
-    return (prods || []).map((p: any) =>
-      normalizeProductRow(p, p.categorias?.nome, p.categorias?.slug, byProd.get(p.id) || [])
-    );
+    return (data || []).map(mapSupabaseProductRow);
   }
 
   const rows = db
@@ -437,21 +603,15 @@ export async function listProdutos(includeInactive = false) {
     arr.push(img);
     byProd.set(img.produto_id, arr);
   }
-  return rows.map((p) => normalizeProductRow(p, p.categoria_nome, p.categoria_slug, byProd.get(p.id) || []));
+  return rows.map((p) => normalizeSqliteProductRow(p, p.categoria_nome, p.categoria_slug, byProd.get(p.id) || []));
 }
 
 export async function getProdutoById(id: string) {
   const sb = getSupabaseAdmin();
   if (sb) {
-    const { data: p } = await sb.from('produtos').select('*, categorias(nome, slug)').eq('id', id).maybeSingle();
+    const { data: p } = await sb.from('products').select('*, categorias(nome, slug)').eq('id', id).maybeSingle();
     if (!p) return null;
-    const { data: imgs } = await sb
-      .from('imagens_produtos')
-      .select('*')
-      .eq('produto_id', id)
-      .order('principal', { ascending: false })
-      .order('ordem', { ascending: true });
-    return normalizeProductRow(p, p.categorias?.nome, p.categorias?.slug, imgs || []);
+    return mapSupabaseProductRow(p);
   }
   const row = db
     .prepare(`
@@ -461,36 +621,39 @@ export async function getProdutoById(id: string) {
     .get(id) as any;
   if (!row) return null;
   const imgs = db.prepare(`SELECT * FROM imagens_produtos WHERE produto_id = ? ORDER BY principal DESC, ordem ASC`).all(id) as any[];
-  return normalizeProductRow(row, row.categoria_nome, row.categoria_slug, imgs);
+  return normalizeSqliteProductRow(row, row.categoria_nome, row.categoria_slug, imgs);
 }
 
 export async function createProduto(input: any) {
   const stock = Math.max(0, Number(input.estoque_quantidade || 0));
-  const computedSituacao = input.situacao === 'INATIVO' ? 'INATIVO' : stock <= 0 ? 'ESGOTADO' : 'DISPONIVEL';
+  const unitType = resolveUnitType(input.unit_type || input.modalidade_venda);
+  const active = input.situacao !== 'INATIVO' && input.active !== false;
   const sb = getSupabaseAdmin();
+
   if (sb) {
+    const price = Number((Math.round(Number(input.preco_centavos)) / 100).toFixed(2));
+    const promoPrice = input.preco_promocional_centavos
+      ? Number((Math.round(Number(input.preco_promocional_centavos)) / 100).toFixed(2))
+      : null;
+
     const { data, error } = await sb
-      .from('produtos')
+      .from('products')
       .insert({
-        categoria_id: input.categoria_id,
-        nome: String(input.nome).trim(),
-        nome_normalizado: normalizeText(String(input.nome)),
-        descricao_completa: String(input.descricao_completa).trim(),
-        observacao_curta: String(input.observacao_curta).trim(),
-        palavras_chave: String(input.palavras_chave || ''),
-        palavras_chave_normalizadas: normalizeText(String(input.palavras_chave || '')),
-        preco_centavos: Math.round(Number(input.preco_centavos)),
-        preco_promocional_centavos: input.preco_promocional_centavos ? Math.round(Number(input.preco_promocional_centavos)) : null,
-        estoque_quantidade: stock,
-        estoque_baixo_limite: Number(input.estoque_baixo_limite ?? 5),
-        unidade_venda: input.unidade_venda || 'UN',
-        modalidade_venda: input.modalidade_venda || 'UNIDADE',
-        precisao_pesagem: Number(input.precisao_pesagem ?? 3),
-        permite_parcelamento: false,
-        max_parcelas_produto: 1,
-        situacao: computedSituacao,
-        destaque: Boolean(input.destaque),
-        oferta: Boolean(input.oferta),
+        category_id: input.categoria_id || null,
+        name: String(input.nome).trim(),
+        name_normalized: normalizeText(String(input.nome)),
+        short_description: String(input.observacao_curta || '').trim(),
+        description: String(input.descricao_completa || '').trim(),
+        keywords: String(input.palavras_chave || ''),
+        keywords_normalized: normalizeText(String(input.palavras_chave || '')),
+        unit_type: unitType,
+        price,
+        promo_price: promoPrice,
+        stock,
+        low_stock_limit: Number(input.estoque_baixo_limite ?? 5),
+        active,
+        featured: Boolean(input.destaque),
+        on_sale: Boolean(input.oferta),
       })
       .select('id')
       .single();
@@ -498,6 +661,7 @@ export async function createProduto(input: any) {
     return getProdutoById(data.id);
   }
 
+  const computedSituacao = !active ? 'INATIVO' : stock <= 0 ? 'ESGOTADO' : 'DISPONIVEL';
   const id = crypto.randomUUID();
   db.prepare(`
     INSERT INTO produtos (
@@ -505,7 +669,7 @@ export async function createProduto(input: any) {
       palavras_chave, palavras_chave_normalizadas, preco_centavos, preco_promocional_centavos,
       estoque_quantidade, estoque_baixo_limite, unidade_venda, modalidade_venda,
       precisao_pesagem, permite_parcelamento, max_parcelas_produto, situacao, destaque, oferta
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 1, ?, ?, ?)
   `).run(
     id,
     input.categoria_id,
@@ -519,11 +683,9 @@ export async function createProduto(input: any) {
     input.preco_promocional_centavos ? Math.round(Number(input.preco_promocional_centavos)) : null,
     stock,
     Number(input.estoque_baixo_limite ?? 5),
-    input.unidade_venda || 'UN',
-    input.modalidade_venda || 'UNIDADE',
-    Number(input.precisao_pesagem ?? 3),
-    0,
-    1,
+    unitType === 'kg' ? 'KG' : 'UN',
+    unitType === 'kg' ? 'PESO_KG' : 'UNIDADE',
+    unitType === 'kg' ? 3 : 0,
     computedSituacao,
     input.destaque ? 1 : 0,
     input.oferta ? 1 : 0
@@ -538,53 +700,51 @@ export async function updateProduto(id: string, b: any) {
   const nome = b.nome !== undefined ? String(b.nome).trim() : existing.nome;
   const palavras = b.palavras_chave !== undefined ? String(b.palavras_chave) : existing.palavras_chave;
   const stock = b.estoque_quantidade !== undefined ? Math.max(0, Number(b.estoque_quantidade)) : existing.estoque_quantidade;
-  let nextSituacao = b.situacao !== undefined ? b.situacao : existing.situacao;
-  if (nextSituacao !== 'INATIVO') {
-    nextSituacao = stock <= 0 ? 'ESGOTADO' : 'DISPONIVEL';
-  }
+  const unitType = resolveUnitType(b.unit_type ?? b.modalidade_venda ?? existing.unit_type);
+  const active = b.active !== undefined ? Boolean(b.active) : b.situacao !== undefined ? b.situacao !== 'INATIVO' : existing.situacao !== 'INATIVO';
 
   const sb = getSupabaseAdmin();
   if (sb) {
+    const precoCent = b.preco_centavos !== undefined ? Math.round(Number(b.preco_centavos)) : existing.preco_centavos;
+    const promoCent =
+      b.preco_promocional_centavos !== undefined
+        ? b.preco_promocional_centavos
+          ? Math.round(Number(b.preco_promocional_centavos))
+          : null
+        : existing.preco_promocional_centavos;
+
     const { error } = await sb
-      .from('produtos')
+      .from('products')
       .update({
-        categoria_id: b.categoria_id ?? existing.categoria_id,
-        nome,
-        nome_normalizado: normalizeText(nome),
-        descricao_completa: b.descricao_completa ?? existing.descricao_completa,
-        observacao_curta: b.observacao_curta ?? existing.observacao_curta,
-        palavras_chave: palavras,
-        palavras_chave_normalizadas: normalizeText(palavras),
-        preco_centavos: b.preco_centavos !== undefined ? Math.round(Number(b.preco_centavos)) : existing.preco_centavos,
-        preco_promocional_centavos:
-          b.preco_promocional_centavos !== undefined
-            ? b.preco_promocional_centavos
-              ? Math.round(Number(b.preco_promocional_centavos))
-              : null
-            : existing.preco_promocional_centavos,
-        estoque_quantidade: stock,
-        estoque_baixo_limite: b.estoque_baixo_limite !== undefined ? Number(b.estoque_baixo_limite) : existing.estoque_baixo_limite,
-        unidade_venda: b.unidade_venda ?? existing.unidade_venda,
-        modalidade_venda: b.modalidade_venda ?? existing.modalidade_venda,
-        precisao_pesagem: b.precisao_pesagem !== undefined ? Number(b.precisao_pesagem) : existing.precisao_pesagem,
-        permite_parcelamento: b.permite_parcelamento !== undefined ? Boolean(b.permite_parcelamento) : existing.permite_parcelamento === 1,
-        max_parcelas_produto: b.max_parcelas_produto !== undefined ? Number(b.max_parcelas_produto) : existing.max_parcelas_produto,
-        situacao: nextSituacao,
-        destaque: b.destaque !== undefined ? Boolean(b.destaque) : existing.destaque === 1,
-        oferta: b.oferta !== undefined ? Boolean(b.oferta) : existing.oferta === 1,
-        atualizado_em: new Date().toISOString(),
+        category_id: b.categoria_id ?? existing.categoria_id,
+        name: nome,
+        name_normalized: normalizeText(nome),
+        description: b.descricao_completa ?? existing.descricao_completa,
+        short_description: b.observacao_curta ?? existing.observacao_curta,
+        keywords: palavras,
+        keywords_normalized: normalizeText(palavras),
+        unit_type: unitType,
+        price: Number((precoCent / 100).toFixed(2)),
+        promo_price: promoCent !== null ? Number((promoCent / 100).toFixed(2)) : null,
+        stock,
+        low_stock_limit: b.estoque_baixo_limite !== undefined ? Number(b.estoque_baixo_limite) : existing.estoque_baixo_limite,
+        active,
+        featured: b.destaque !== undefined ? Boolean(b.destaque) : existing.destaque === 1,
+        on_sale: b.oferta !== undefined ? Boolean(b.oferta) : existing.oferta === 1,
+        updated_at: new Date().toISOString(),
       })
       .eq('id', id);
     if (error) throw new Error(error.message);
     return getProdutoById(id);
   }
 
+  let nextSituacao = !active ? 'INATIVO' : stock <= 0 ? 'ESGOTADO' : 'DISPONIVEL';
   db.prepare(`
     UPDATE produtos SET
       categoria_id = ?, nome = ?, nome_normalizado = ?, descricao_completa = ?, observacao_curta = ?,
       palavras_chave = ?, palavras_chave_normalizadas = ?, preco_centavos = ?, preco_promocional_centavos = ?,
       estoque_quantidade = ?, estoque_baixo_limite = ?, unidade_venda = ?, modalidade_venda = ?,
-      precisao_pesagem = ?, permite_parcelamento = ?, max_parcelas_produto = ?, situacao = ?,
+      precisao_pesagem = ?, permite_parcelamento = 0, max_parcelas_produto = 1, situacao = ?,
       destaque = ?, oferta = ?, atualizado_em = datetime('now')
     WHERE id = ?
   `).run(
@@ -603,11 +763,9 @@ export async function updateProduto(id: string, b: any) {
       : existing.preco_promocional_centavos,
     stock,
     b.estoque_baixo_limite !== undefined ? Number(b.estoque_baixo_limite) : existing.estoque_baixo_limite,
-    b.unidade_venda ?? existing.unidade_venda,
-    b.modalidade_venda ?? existing.modalidade_venda,
-    b.precisao_pesagem !== undefined ? Number(b.precisao_pesagem) : existing.precisao_pesagem,
-    b.permite_parcelamento !== undefined ? (b.permite_parcelamento ? 1 : 0) : existing.permite_parcelamento,
-    b.max_parcelas_produto !== undefined ? Number(b.max_parcelas_produto) : existing.max_parcelas_produto,
+    unitType === 'kg' ? 'KG' : 'UN',
+    unitType === 'kg' ? 'PESO_KG' : 'UNIDADE',
+    unitType === 'kg' ? 3 : 0,
     nextSituacao,
     b.destaque !== undefined ? (b.destaque ? 1 : 0) : existing.destaque,
     b.oferta !== undefined ? (b.oferta ? 1 : 0) : existing.oferta,
@@ -619,12 +777,11 @@ export async function updateProduto(id: string, b: any) {
 export async function deleteOrInactivateProduto(id: string) {
   const sb = getSupabaseAdmin();
   if (sb) {
-    const { count } = await sb.from('itens_pedido').select('id', { count: 'exact', head: true }).eq('produto_id', id);
-    if ((count || 0) > 0) {
-      await sb.from('produtos').update({ situacao: 'INATIVO', atualizado_em: new Date().toISOString() }).eq('id', id);
+    const { error } = await sb.from('products').delete().eq('id', id);
+    if (error) {
+      await sb.from('products').update({ active: false, updated_at: new Date().toISOString() }).eq('id', id);
       return { ok: true, inactivated: true };
     }
-    await sb.from('produtos').delete().eq('id', id);
     return { ok: true };
   }
 
@@ -640,13 +797,18 @@ export async function deleteOrInactivateProduto(id: string) {
 export async function uploadProductImages(produtoId: string, files: Express.Multer.File[]) {
   const sb = getSupabaseAdmin();
   if (sb) {
-    const { count } = await sb
-      .from('imagens_produtos')
-      .select('id', { count: 'exact', head: true })
-      .eq('produto_id', produtoId);
-    const existingCount = count || 0;
-    const created: any[] = [];
+    const { data: prod } = await sb
+      .from('products')
+      .select('image_url, gallery_urls')
+      .eq('id', produtoId)
+      .maybeSingle();
+    if (!prod) throw new Error('Produto não encontrado.');
 
+    const gallery: string[] = Array.isArray(prod.gallery_urls) ? [...prod.gallery_urls] : [];
+    let mainUrl: string | null = prod.image_url || null;
+    if (mainUrl && !gallery.includes(mainUrl)) gallery.unshift(mainUrl);
+
+    const created: any[] = [];
     for (let idx = 0; idx < files.length; idx++) {
       const file = files[idx];
       const ext = path.extname(file.originalname).toLowerCase() || '.jpg';
@@ -658,28 +820,29 @@ export async function uploadProductImages(produtoId: string, files: Express.Mult
         upsert: false,
       });
 
-      // Remove temporary local file after uploading to Supabase Storage
       if (fs.existsSync(file.path)) fs.unlinkSync(file.path);
-
       if (upErr) throw new Error(`Erro no Supabase Storage: ${upErr.message}`);
 
       const { data: pub } = sb.storage.from('produtos').getPublicUrl(storagePath);
-      const isPrimary = existingCount === 0 && idx === 0;
-
-      const { data: imgRow, error: insErr } = await sb
-        .from('imagens_produtos')
-        .insert({
-          produto_id: produtoId,
-          url: pub.publicUrl,
-          nome_arquivo: file.originalname,
-          principal: isPrimary,
-          ordem: existingCount + idx,
-        })
-        .select('*')
-        .single();
-      if (insErr) throw new Error(insErr.message);
-      created.push(imgRow);
+      if (!mainUrl) mainUrl = pub.publicUrl;
+      gallery.push(pub.publicUrl);
+      created.push({
+        id: `${produtoId}::img::${gallery.length - 1}`,
+        produto_id: produtoId,
+        url: pub.publicUrl,
+        principal: mainUrl === pub.publicUrl ? 1 : 0,
+      });
     }
+
+    await sb
+      .from('products')
+      .update({
+        image_url: mainUrl,
+        gallery_urls: gallery,
+        updated_at: new Date().toISOString(),
+      })
+      .eq('id', produtoId);
+
     return created;
   }
 
@@ -705,20 +868,36 @@ export async function uploadProductImages(produtoId: string, files: Express.Mult
 export async function deleteProductImage(produtoId: string, imgId: string) {
   const sb = getSupabaseAdmin();
   if (sb) {
-    const { data: img } = await sb
-      .from('imagens_produtos')
-      .select('*')
-      .eq('id', imgId)
-      .eq('produto_id', produtoId)
-      .maybeSingle();
-    if (!img) return false;
-    const marker = '/storage/v1/object/public/produtos/';
-    const idx = img.url.indexOf(marker);
-    if (idx !== -1) {
-      const objectPath = img.url.slice(idx + marker.length);
-      await sb.storage.from('produtos').remove([objectPath]);
+    const idxMatch = imgId.split('::img::')[1];
+    const idx = Number(idxMatch);
+    const { data: prod } = await sb.from('products').select('image_url, gallery_urls').eq('id', produtoId).maybeSingle();
+    if (!prod || Number.isNaN(idx)) return false;
+
+    const urls: string[] = [];
+    if (prod.image_url) urls.push(prod.image_url);
+    if (Array.isArray(prod.gallery_urls)) {
+      for (const u of prod.gallery_urls) {
+        if (typeof u === 'string' && !urls.includes(u)) urls.push(u);
+      }
     }
-    await sb.from('imagens_produtos').delete().eq('id', imgId);
+    const targetUrl = urls[idx];
+    if (!targetUrl) return false;
+
+    const marker = '/storage/v1/object/public/produtos/';
+    const mIdx = targetUrl.indexOf(marker);
+    if (mIdx !== -1) {
+      await sb.storage.from('produtos').remove([targetUrl.slice(mIdx + marker.length)]);
+    }
+
+    const nextUrls = urls.filter((_, i) => i !== idx);
+    await sb
+      .from('products')
+      .update({
+        image_url: nextUrls[0] || null,
+        gallery_urls: nextUrls,
+        updated_at: new Date().toISOString(),
+      })
+      .eq('id', produtoId);
     return true;
   }
 
@@ -735,8 +914,21 @@ export async function deleteProductImage(produtoId: string, imgId: string) {
 export async function setPrimaryProductImage(produtoId: string, imgId: string) {
   const sb = getSupabaseAdmin();
   if (sb) {
-    await sb.from('imagens_produtos').update({ principal: false }).eq('produto_id', produtoId);
-    await sb.from('imagens_produtos').update({ principal: true }).eq('id', imgId).eq('produto_id', produtoId);
+    const idx = Number(imgId.split('::img::')[1]);
+    const { data: prod } = await sb.from('products').select('image_url, gallery_urls').eq('id', produtoId).maybeSingle();
+    if (!prod || Number.isNaN(idx)) return;
+    const urls: string[] = [];
+    if (prod.image_url) urls.push(prod.image_url);
+    if (Array.isArray(prod.gallery_urls)) {
+      for (const u of prod.gallery_urls) {
+        if (typeof u === 'string' && !urls.includes(u)) urls.push(u);
+      }
+    }
+    if (urls[idx]) {
+      const chosen = urls[idx];
+      const reordered = [chosen, ...urls.filter((_, i) => i !== idx)];
+      await sb.from('products').update({ image_url: chosen, gallery_urls: reordered }).eq('id', produtoId);
+    }
     return;
   }
   db.prepare(`UPDATE imagens_produtos SET principal = 0 WHERE produto_id = ?`).run(produtoId);
@@ -744,12 +936,11 @@ export async function setPrimaryProductImage(produtoId: string, imgId: string) {
 }
 
 // ==============================================================================
-// PERSISTENT CART
+// PERSISTENT CART (Shipping strictly R$ 4,99 when cart has items)
 // ==============================================================================
 
 export async function getCartPayload(clienteId: string) {
-  const cfg = await getConfigMap();
-  const freteCentavos = Number(cfg.frete_padrao_centavos || 1500);
+  const freteCentavos = 499;
   const sb = getSupabaseAdmin();
 
   if (sb) {
@@ -759,37 +950,29 @@ export async function getCartPayload(clienteId: string) {
     }
     const { data: rows } = await sb
       .from('itens_carrinho')
-      .select('*, produtos(nome, observacao_curta, unidade_venda, modalidade_venda, precisao_pesagem, estoque_quantidade, situacao, preco_centavos, preco_promocional_centavos, oferta, max_parcelas_produto)')
+      .select('*, products(name, short_description, unit_type, price, promo_price, on_sale, stock, active, image_url)')
       .eq('carrinho_id', cartRow.id)
       .order('criado_em', { ascending: true });
 
-    const { data: imgs } = await sb
-      .from('imagens_produtos')
-      .select('produto_id, url')
-      .order('principal', { ascending: false })
-      .order('ordem', { ascending: true });
-
-    const imgMap = new Map<string, string>();
-    for (const i of imgs || []) {
-      if (!imgMap.has(i.produto_id)) imgMap.set(i.produto_id, i.url);
-    }
-
-    const itens = (rows || []).map((r: any) => ({
-      ...r,
-      quantidade: Number(r.quantidade),
-      produto_nome: r.produtos?.nome,
-      observacao_curta: r.produtos?.observacao_curta,
-      unidade_venda: r.produtos?.unidade_venda,
-      modalidade_venda: r.produtos?.modalidade_venda,
-      precisao_pesagem: r.produtos?.precisao_pesagem ?? 3,
-      estoque_quantidade: Number(r.produtos?.estoque_quantidade ?? 0),
-      situacao: r.produtos?.situacao,
-      preco_centavos: r.produtos?.preco_centavos,
-      preco_promocional_centavos: r.produtos?.preco_promocional_centavos,
-      oferta: boolNum(r.produtos?.oferta),
-      max_parcelas_produto: r.produtos?.max_parcelas_produto ?? 6,
-      imagem_principal: imgMap.get(r.produto_id) || null,
-    }));
+    const itens = (rows || []).map((r: any) => {
+      const p = r.products;
+      const unitType: 'kg' | 'un' = p?.unit_type === 'kg' ? 'kg' : 'un';
+      const stock = Number(p?.stock ?? 0);
+      return {
+        ...r,
+        quantidade: Number(r.quantidade),
+        produto_nome: p?.name,
+        observacao_curta: p?.short_description || '',
+        unit_type: unitType,
+        unidade_venda: unitType === 'kg' ? 'KG' : 'UN',
+        modalidade_venda: unitType === 'kg' ? 'PESO_KG' : 'UNIDADE',
+        precisao_pesagem: unitType === 'kg' ? 3 : 0,
+        estoque_quantidade: stock,
+        situacao: !p?.active ? 'INATIVO' : stock <= 0 ? 'ESGOTADO' : 'DISPONIVEL',
+        max_parcelas_produto: 1,
+        imagem_principal: p?.image_url || null,
+      };
+    });
 
     const subtotalCentavos = itens.reduce((acc, it) => acc + Number(it.subtotal_centavos), 0);
     const frete = itens.length > 0 ? freteCentavos : 0;
@@ -810,7 +993,7 @@ export async function getCartPayload(clienteId: string) {
     .prepare(`
       SELECT ic.*, p.nome as produto_nome, p.observacao_curta, p.unidade_venda,
              p.modalidade_venda, p.precisao_pesagem, p.estoque_quantidade, p.situacao,
-             p.preco_centavos, p.preco_promocional_centavos, p.oferta, p.max_parcelas_produto
+             p.preco_centavos, p.preco_promocional_centavos, p.oferta
       FROM itens_carrinho ic
       JOIN produtos p ON p.id = ic.produto_id
       WHERE ic.carrinho_id = ?
@@ -826,7 +1009,17 @@ export async function getCartPayload(clienteId: string) {
   for (const i of imgs) {
     if (!imgMap.has(i.produto_id)) imgMap.set(i.produto_id, i.url);
   }
-  const itens = rows.map((r) => ({ ...r, imagem_principal: imgMap.get(r.produto_id) || null }));
+  const itens = rows.map((r) => {
+    const unitType = resolveUnitType(r.modalidade_venda);
+    return {
+      ...r,
+      unit_type: unitType,
+      unidade_venda: unitType === 'kg' ? 'KG' : 'UN',
+      modalidade_venda: unitType === 'kg' ? 'PESO_KG' : 'UNIDADE',
+      max_parcelas_produto: 1,
+      imagem_principal: imgMap.get(r.produto_id) || null,
+    };
+  });
   const subtotalCentavos = itens.reduce((acc, it) => acc + Number(it.subtotal_centavos), 0);
   const frete = itens.length > 0 ? freteCentavos : 0;
   return {
@@ -857,6 +1050,6 @@ export async function getOrCreateCart(clienteId: string): Promise<string> {
 export function getStorageModeInfo() {
   return {
     engine: isSupabaseConfigured() ? 'supabase' : 'sqlite-local',
-    supabaseUrl: process.env.SUPABASE_URL || '',
+    supabaseUrl: resolveSupabaseUrl(),
   };
 }

@@ -17,16 +17,13 @@ export function ProductCard({ product, onSelect }: ProductCardProps) {
     product.preco_promocional_centavos > 0 &&
     product.preco_promocional_centavos < product.preco_centavos;
 
-  const unitLabel =
-    product.modalidade_venda === 'UNIDADE'
-      ? 'por unidade'
-      : 'por kg';
+  const isKg = product.unit_type === 'kg' || product.modalidade_venda === 'PESO_KG';
+  const unitLabel = isKg ? 'por kg' : 'por unidade';
 
   return (
     <article
       className="group bg-white border border-zinc-200 rounded-xl overflow-hidden flex flex-col transition-all duration-200 hover:-translate-y-0.5 hover:shadow-md"
     >
-      {/* Product image */}
       <div
         onClick={() => onSelect(product)}
         className="relative aspect-[4/3] bg-[#F5F2EB] overflow-hidden cursor-pointer"
@@ -49,9 +46,7 @@ export function ProductCard({ product, onSelect }: ProductCardProps) {
         )}
       </div>
 
-      {/* Card body with consistent field order */}
       <div className="p-5 flex-1 flex flex-col">
-        {/* Clean unboxed metadata (Zero-Pill discipline) */}
         <div className="flex items-center gap-1.5 text-xs text-zinc-500 mb-1.5">
           <span className="uppercase tracking-wide font-medium text-zinc-600">
             {product.categoria_nome || 'Agropecuária'}
@@ -75,12 +70,10 @@ export function ProductCard({ product, onSelect }: ProductCardProps) {
           {product.nome}
         </h3>
 
-        {/* Short observation visible directly on catalog card */}
         <p className="text-sm text-zinc-600 leading-relaxed line-clamp-2 mb-4 flex-1">
           {product.observacao_curta}
         </p>
 
-        {/* Price + Action baseline */}
         <div className="pt-3 border-t border-zinc-100 flex items-center justify-between gap-3">
           <div>
             {hasPromo && (
@@ -99,7 +92,7 @@ export function ProductCard({ product, onSelect }: ProductCardProps) {
             onClick={() => onSelect(product)}
             className="px-4 py-2 text-xs font-semibold rounded-lg border border-[#143824] text-[#143824] hover:bg-[#143824] hover:text-white transition-colors whitespace-nowrap shrink-0 cursor-pointer"
           >
-            Ver detalhes
+            Comprar
           </button>
         </div>
       </div>

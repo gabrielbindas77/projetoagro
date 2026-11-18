@@ -2,6 +2,7 @@ import { useEffect, useState, useCallback, type FormEvent } from 'react';
 import { Search, SlidersHorizontal, ArrowRight } from 'lucide-react';
 import { apiFetch, setAuthToken } from './lib/api.ts';
 import { formatBRL } from './lib/format.ts';
+import { getSupabaseBrowserClient, isFrontendSupabaseConfigured } from './lib/supabase.ts';
 import type {
   CartItem,
   CartState,
@@ -13,7 +14,6 @@ import type {
 } from './types.ts';
 import { Navbar } from './components/Navbar.tsx';
 import { AuthModal } from './components/AuthModal.tsx';
-import { AuthGateScreen } from './components/AuthGateScreen.tsx';
 import { ProductCard } from './components/ProductCard.tsx';
 import { ProductModal } from './components/ProductModal.tsx';
 import { CartDrawer } from './components/CartDrawer.tsx';
@@ -22,6 +22,9 @@ import { MyOrdersPage } from './components/MyOrdersPage.tsx';
 import { ChatPage } from './components/ChatPage.tsx';
 import { AdminPanel } from './components/AdminPanel.tsx';
 import { WhatsAppButton } from './components/WhatsAppButton.tsx';
+
+const GUEST_CART_KEY = 'agro_marconato_guest_cart_v1';
+const FIXED_SHIPPING_CENTAVOS = 499;
 
 const EMPTY_CART: CartState = {
   carrinho_id: null,
@@ -32,7 +35,7 @@ const EMPTY_CART: CartState = {
 };
 
 const DEFAULT_CONFIG: PublicConfig = {
-  frete_padrao_centavos: 499,
+  frete_padrao_centavos: FIXED_SHIPPING_CENTAVOS,
   max_parcelas: 1,
   parcelas_sem_juros: 1,
   taxa_juros_mensal: 0,
@@ -42,6 +45,39 @@ const DEFAULT_CONFIG: PublicConfig = {
   mercado_pago_public_key: '',
   mercado_pago_configurado: false,
 };
+
+function computeGuestCartTotals(itens: CartItem[]): CartState {
+  const subtotal = itens.reduce((acc, it) => acc + Number(it.subtotal_centavos), 0);
+  const frete = itens.length > 0 ? FIXED_SHIPPING_CENTAVOS : 0;
+  return {
+    carrinho_id: 'guest',
+    itens,
+    subtotal_centavos: subtotal,
+    frete_centavos: frete,
+    total_centavos: subtotal + frete,
+  };
+}
+
+function readGuestCartFromStorage(): CartState {
+  try {
+    const raw = localStorage.getItem(GUEST_CART_KEY);
+    if (!raw) return EMPTY_CART;
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return EMPTY_CART;
+    return computeGuestCartTotals(parsed);
+  } catch {
+    return EMPTY_CART;
+  }
+}
+
+function writeGuestCartToStorage(itens: CartItem[]): CartState {
+  if (itens.length === 0) {
+    localStorage.removeItem(GUEST_CART_KEY);
+    return EMPTY_CART;
+  }
+  localStorage.setItem(GUEST_CART_KEY, JSON.stringify(itens));
+  return computeGuestCartTotals(itens);
+}
 
 export default function App() {
   const [currentPath, setCurrentPath] = useState<string>(() => window.location.pathname || '/');
@@ -58,12 +94,15 @@ export default function App() {
   const [availabilityFilter, setAvailabilityFilter] = useState('');
   const [maxPriceFilter, setMaxPriceFilter] = useState('');
 
-  const [authModalMode, setAuthModalMode] = useState<'login' | 'register' | 'recovery' | 'verify' | null>(null);
+  const [authModalMode, setAuthModalMode] = useState<'login' | 'register' | null>(null);
+  const [pendingCheckoutAfterAuth, setPendingCheckoutAfterAuth] = useState(false);
   const [selectedProduct, setSelectedProduct] = useState<Product | null>(null);
   const [cartOpen, setCartOpen] = useState(false);
   const [checkoutOpen, setCheckoutOpen] = useState(false);
-  const [cart, setCart] = useState<CartState>(EMPTY_CART);
+  const [cart, setCart] = useState<CartState>(() => readGuestCartFromStorage());
   const [chatOrderId, setChatOrderId] = useState<string | null>(null);
+
+  const isAdmin = Boolean(user?.is_admin || user?.papel === 'ADMIN');
 
   useEffect(() => {
     const onPopState = () => setCurrentPath(window.location.pathname || '/');
@@ -98,7 +137,11 @@ export default function App() {
   }, []);
 
   const loadCart = useCallback(async (u: User | null) => {
-    if (!u || u.papel !== 'CLIENTE') {
+    if (!u) {
+      setCart(readGuestCartFromStorage());
+      return;
+    }
+    if (u.is_admin || u.papel === 'ADMIN') {
       setCart(EMPTY_CART);
       return;
     }
@@ -112,36 +155,38 @@ export default function App() {
 
   useEffect(() => {
     loadConfig();
+    loadCategories();
     apiFetch<{ user: User | null }>('/api/auth/me')
       .then((res) => {
         setUser(res.user);
         if (res.user) {
-          loadCategories();
           loadCart(res.user);
+          if ((res.user.is_admin || res.user.papel === 'ADMIN') && window.location.pathname === '/') {
+            navigate('/admin');
+          }
         } else {
           setAuthToken(null);
+          setCart(readGuestCartFromStorage());
         }
       })
       .catch(() => {
         setAuthToken(null);
+        setCart(readGuestCartFromStorage());
       })
       .finally(() => setAuthChecked(true));
-  }, [loadConfig, loadCategories, loadCart]);
+  }, [loadConfig, loadCategories, loadCart, navigate]);
 
   useEffect(() => {
     const onExpired = () => {
       setAuthToken(null);
       setUser(null);
-      setCart(EMPTY_CART);
-      setProducts([]);
-      setCategories([]);
+      setCart(readGuestCartFromStorage());
     };
     window.addEventListener('agro:session-expired', onExpired);
     return () => window.removeEventListener('agro:session-expired', onExpired);
   }, []);
 
   const loadProducts = useCallback(async () => {
-    if (!user) return;
     setLoadingProducts(true);
     try {
       const params = new URLSearchParams();
@@ -158,13 +203,13 @@ export default function App() {
     } finally {
       setLoadingProducts(false);
     }
-  }, [user, appliedQuery, selectedCategory, availabilityFilter, maxPriceFilter, currentPath]);
+  }, [appliedQuery, selectedCategory, availabilityFilter, maxPriceFilter, currentPath]);
 
   useEffect(() => {
-    if (user && (currentPath === '/' || currentPath === '/ofertas')) {
+    if (currentPath === '/' || currentPath === '/ofertas' || (!isAdmin && currentPath === '/admin')) {
       loadProducts();
     }
-  }, [user, currentPath, loadProducts]);
+  }, [currentPath, isAdmin, loadProducts]);
 
   function handleSearchSubmit(e: FormEvent) {
     e.preventDefault();
@@ -172,98 +217,207 @@ export default function App() {
   }
 
   async function handleAddToCart(payload: {
+    product: Product;
     produtoId: string;
     modoCompra: ModoCompra;
-    quantidade?: number;
-    valorDesejadoCentavos?: number;
+    quantidade: number;
   }) {
-    if (!user) {
-      setSelectedProduct(null);
+    if (isAdmin) {
+      throw new Error('Contas de administrador gerenciam a loja e não realizam compras.');
+    }
+
+    if (user) {
+      const nextCart = await apiFetch<CartState>('/api/carrinho/itens', {
+        method: 'POST',
+        body: JSON.stringify({
+          produtoId: payload.produtoId,
+          modoCompra: payload.modoCompra,
+          quantidade: payload.quantidade,
+        }),
+      });
+      setCart(nextCart);
+      setCartOpen(true);
       return;
     }
-    if (user.papel === 'ADMIN') {
-      throw new Error('Contas de administrador não realizam compras. Entre com uma conta de cliente.');
+
+    // Guest cart persisted in localStorage
+    const p = payload.product;
+    const isKg = p.unit_type === 'kg' || p.modalidade_venda === 'PESO_KG';
+    const precisao = isKg ? p.precisao_pesagem || 3 : 0;
+    const precoUnit = p.preco_vigente_centavos;
+    const current = readGuestCartFromStorage().itens;
+
+    const existingIdx = current.findIndex(
+      (it) => it.produto_id === p.id && it.modo_compra === payload.modoCompra
+    );
+
+    const nextItems = [...current];
+    if (existingIdx >= 0) {
+      const prev = nextItems[existingIdx];
+      const nextQty = isKg
+        ? Number((prev.quantidade + payload.quantidade).toFixed(precisao))
+        : Math.floor(prev.quantidade + payload.quantidade);
+      if (nextQty > p.estoque_quantidade) {
+        throw new Error(`Estoque insuficiente. Disponível: ${p.estoque_quantidade} ${isKg ? 'kg' : 'un.'}`);
+      }
+      nextItems[existingIdx] = {
+        ...prev,
+        quantidade: nextQty,
+        subtotal_centavos: Math.round(nextQty * precoUnit),
+      };
+    } else {
+      if (payload.quantidade > p.estoque_quantidade) {
+        throw new Error(`Estoque insuficiente. Disponível: ${p.estoque_quantidade} ${isKg ? 'kg' : 'un.'}`);
+      }
+      nextItems.push({
+        id: `guest-${p.id}-${payload.modoCompra}`,
+        carrinho_id: 'guest',
+        produto_id: p.id,
+        produto_nome: p.nome,
+        observacao_curta: p.observacao_curta,
+        unit_type: isKg ? 'kg' : 'un',
+        unidade_venda: isKg ? 'KG' : 'UN',
+        modalidade_venda: isKg ? 'PESO_KG' : 'UNIDADE',
+        precisao_pesagem: precisao,
+        estoque_quantidade: p.estoque_quantidade,
+        situacao: p.situacao,
+        modo_compra: payload.modoCompra,
+        quantidade: payload.quantidade,
+        valor_desejado_centavos: null,
+        preco_unitario_snapshot_centavos: precoUnit,
+        subtotal_centavos: Math.round(payload.quantidade * precoUnit),
+        imagem_principal: p.imagem_principal,
+        max_parcelas_produto: 1,
+      });
     }
-    const nextCart = await apiFetch<CartState>('/api/carrinho/itens', {
-      method: 'POST',
-      body: JSON.stringify(payload),
-    });
-    setCart(nextCart);
+
+    setCart(writeGuestCartToStorage(nextItems));
     setCartOpen(true);
   }
 
-  async function handleUpdateCartItem(
-    item: CartItem,
-    nextValue: { quantidade?: number; valorDesejadoCentavos?: number }
-  ) {
-    const nextCart = await apiFetch<CartState>(`/api/carrinho/itens/${item.id}`, {
-      method: 'PATCH',
-      body: JSON.stringify({ modoCompra: item.modo_compra, ...nextValue }),
-    });
-    setCart(nextCart);
+  async function handleUpdateCartItem(item: CartItem, nextValue: { quantidade: number }) {
+    if (user) {
+      const nextCart = await apiFetch<CartState>(`/api/carrinho/itens/${item.id}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ modoCompra: item.modo_compra, quantidade: nextValue.quantidade }),
+      });
+      setCart(nextCart);
+      return;
+    }
+
+    const isKg = item.unit_type === 'kg' || item.modo_compra === 'PESO_KG';
+    const nextQty = isKg
+      ? Number(Number(nextValue.quantidade).toFixed(item.precisao_pesagem || 3))
+      : Math.floor(Number(nextValue.quantidade));
+    if (nextQty <= 0) {
+      await handleRemoveCartItem(item.id);
+      return;
+    }
+    const clampedQty = Math.min(nextQty, item.estoque_quantidade);
+    const current = readGuestCartFromStorage().itens;
+    const nextItems = current.map((it) =>
+      it.id === item.id
+        ? {
+            ...it,
+            quantidade: clampedQty,
+            subtotal_centavos: Math.round(clampedQty * it.preco_unitario_snapshot_centavos),
+          }
+        : it
+    );
+    setCart(writeGuestCartToStorage(nextItems));
   }
 
   async function handleRemoveCartItem(itemId: string) {
-    const nextCart = await apiFetch<CartState>(`/api/carrinho/itens/${itemId}`, {
-      method: 'DELETE',
-    });
-    setCart(nextCart);
+    if (user) {
+      const nextCart = await apiFetch<CartState>(`/api/carrinho/itens/${itemId}`, {
+        method: 'DELETE',
+      });
+      setCart(nextCart);
+      return;
+    }
+
+    const current = readGuestCartFromStorage().itens;
+    setCart(writeGuestCartToStorage(current.filter((it) => it.id !== itemId)));
+  }
+
+  async function handleAuthenticated(u: User) {
+    setUser(u);
+    const adminUser = Boolean(u.is_admin || u.papel === 'ADMIN');
+
+    if (adminUser) {
+      setPendingCheckoutAfterAuth(false);
+      setCart(EMPTY_CART);
+      navigate('/admin');
+      return;
+    }
+
+    const guestState = readGuestCartFromStorage();
+    if (guestState.itens.length > 0) {
+      for (const item of guestState.itens) {
+        try {
+          await apiFetch('/api/carrinho/itens', {
+            method: 'POST',
+            body: JSON.stringify({
+              produtoId: item.produto_id,
+              modoCompra: item.modo_compra,
+              quantidade: item.quantidade,
+            }),
+          });
+        } catch {
+          // Skip item if out of stock during merge
+        }
+      }
+      localStorage.removeItem(GUEST_CART_KEY);
+    }
+
+    await loadCart(u);
+
+    if (pendingCheckoutAfterAuth) {
+      setPendingCheckoutAfterAuth(false);
+      setCheckoutOpen(true);
+    }
   }
 
   async function handleLogout() {
     await apiFetch('/api/auth/logout', { method: 'POST' }).catch(() => {});
+    if (isFrontendSupabaseConfigured()) {
+      await getSupabaseBrowserClient()?.auth.signOut().catch(() => {});
+    }
     setAuthToken(null);
     setUser(null);
-    setCart(EMPTY_CART);
-    setProducts([]);
-    setCategories([]);
+    setPendingCheckoutAfterAuth(false);
+    setCart(readGuestCartFromStorage());
+    if (currentPath === '/admin') {
+      navigate('/');
+    }
   }
 
-  // Wait for initial session check
-  if (!authChecked) {
-    return (
-      <div className="min-h-screen flex items-center justify-center bg-[#FAFBF9] text-sm text-zinc-500">
-        Carregando Agro Marconato...
-      </div>
-    );
-  }
-
-  // Mandatory Auth Gate: nothing of the store appears before login or registration
-  if (!user) {
-    return (
-      <AuthGateScreen
-        isAdminRoute={currentPath === '/admin'}
-        onNavigate={navigate}
-        onAuthenticated={(u) => {
-          setUser(u);
-          loadCategories();
-          loadCart(u);
-          if (u.papel === 'ADMIN' && currentPath === '/') {
-            navigate('/admin');
-          }
-        }}
-      />
-    );
-  }
-
-  const showCatalog = currentPath === '/' || currentPath === '/ofertas';
+  // Only show admin panel when authenticated user explicitly has is_admin === true
+  const showAdminView = isAdmin && currentPath === '/admin';
+  const showCatalog =
+    currentPath === '/' ||
+    currentPath === '/ofertas' ||
+    (!isAdmin && currentPath === '/admin');
 
   return (
     <div className="min-h-screen flex flex-col bg-white text-zinc-900">
       <Navbar
-        currentPath={currentPath}
+        currentPath={showCatalog && currentPath === '/admin' ? '/' : currentPath}
         onNavigate={navigate}
         user={user}
         cartCount={cart.itens.length}
         onOpenCart={() => setCartOpen(true)}
-        onOpenAuth={(mode = 'login') => setAuthModalMode(mode)}
+        onOpenAuth={(mode = 'login') => {
+          setPendingCheckoutAfterAuth(false);
+          setAuthModalMode(mode);
+        }}
         onLogout={handleLogout}
       />
 
       <main className="flex-1">
         {showCatalog && (
           <>
-            {currentPath === '/' && (
+            {(currentPath === '/' || currentPath === '/admin') && (
               <section className="border-b border-zinc-200 bg-[#FAFBF9]">
                 <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-10 lg:py-14 grid grid-cols-1 lg:grid-cols-12 gap-8 items-stretch">
                   <div className="lg:col-span-6 flex flex-col justify-center space-y-5">
@@ -274,8 +428,8 @@ export default function App() {
                       Nutrição animal, sementes e insumos com precisão do campo à sua casa.
                     </h1>
                     <p className="text-base text-zinc-600 leading-relaxed max-w-xl">
-                      Compre por unidade, por quilo exato ou informando o valor em reais que deseja
-                      levar. Entrega ágil, pagamento via PIX, cartão de crédito à vista ou na entrega.
+                      Compre por unidade ou por quilo exato (aceita frações como 0,5 kg ou 1,5 kg).
+                      Frete fixo único de {formatBRL(config.frete_padrao_centavos)} e pagamento via PIX, cartão à vista ou na entrega.
                     </p>
                     <div className="flex flex-wrap items-center gap-4 pt-1">
                       <a
@@ -321,7 +475,7 @@ export default function App() {
                     </p>
                   </div>
                   <div className="text-xs text-zinc-500 font-mono-tabular">
-                    Frete padrão: {formatBRL(config.frete_padrao_centavos)}
+                    Frete fixo: {formatBRL(config.frete_padrao_centavos)}
                   </div>
                 </div>
 
@@ -405,7 +559,7 @@ export default function App() {
                 </div>
               </div>
 
-              {loadingProducts ? (
+              {loadingProducts || !authChecked ? (
                 <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-6">
                   {[1, 2, 3].map((n) => (
                     <div key={n} className="h-80 rounded-xl bg-zinc-100 animate-pulse" />
@@ -415,9 +569,7 @@ export default function App() {
                 <div className="py-16 text-center border border-zinc-200 rounded-xl bg-[#FAFBF9] space-y-2">
                   <p className="text-base font-semibold text-zinc-800">Nenhum produto cadastrado ou encontrado</p>
                   <p className="text-sm text-zinc-500">
-                    {user.papel === 'ADMIN'
-                      ? 'Acesse /admin para cadastrar os produtos reais da sua loja.'
-                      : 'Tente ajustar os termos de busca ou limpar os filtros selecionados.'}
+                    Tente ajustar os termos de busca ou limpar os filtros selecionados.
                   </p>
                   <button
                     type="button"
@@ -463,10 +615,9 @@ export default function App() {
           />
         )}
 
-        {currentPath === '/admin' && (
+        {showAdminView && (
           <AdminPanel
             user={user}
-            onOpenAuth={() => setAuthModalMode('login')}
             onConfigUpdated={loadConfig}
           />
         )}
@@ -486,15 +637,19 @@ export default function App() {
             <button type="button" onClick={() => navigate('/')} className="hover:text-[#143824] cursor-pointer">
               Catálogo
             </button>
-            <button type="button" onClick={() => navigate('/meus-pedidos')} className="hover:text-[#143824] cursor-pointer">
-              Meus Pedidos
-            </button>
-            <button type="button" onClick={() => navigate('/atendimento')} className="hover:text-[#143824] cursor-pointer">
-              Atendimento
-            </button>
-            {user.papel === 'ADMIN' && (
+            {!isAdmin && (
+              <>
+                <button type="button" onClick={() => navigate('/meus-pedidos')} className="hover:text-[#143824] cursor-pointer">
+                  Meus Pedidos
+                </button>
+                <button type="button" onClick={() => navigate('/atendimento')} className="hover:text-[#143824] cursor-pointer">
+                  Atendimento
+                </button>
+              </>
+            )}
+            {isAdmin && (
               <button type="button" onClick={() => navigate('/admin')} className="hover:text-[#143824] cursor-pointer">
-                Painel Admin
+                Gestão da Loja
               </button>
             )}
             <span className="text-zinc-400">© {new Date().getFullYear()} Agro Marconato</span>
@@ -507,12 +662,11 @@ export default function App() {
       {authModalMode && (
         <AuthModal
           initialMode={authModalMode}
-          user={user}
-          onClose={() => setAuthModalMode(null)}
-          onAuthenticated={(u) => {
-            setUser(u);
-            loadCart(u);
+          onClose={() => {
+            setAuthModalMode(null);
+            setPendingCheckoutAfterAuth(false);
           }}
+          onAuthenticated={handleAuthenticated}
         />
       )}
 
@@ -533,11 +687,16 @@ export default function App() {
         onRemoveItem={handleRemoveCartItem}
         onCheckout={() => {
           setCartOpen(false);
-          setCheckoutOpen(true);
+          if (!user) {
+            setPendingCheckoutAfterAuth(true);
+            setAuthModalMode('login');
+          } else if (!isAdmin) {
+            setCheckoutOpen(true);
+          }
         }}
       />
 
-      {checkoutOpen && (
+      {checkoutOpen && user && !isAdmin && (
         <CheckoutModal
           cart={cart}
           config={config}

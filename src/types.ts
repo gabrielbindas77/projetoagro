@@ -7,6 +7,7 @@ export interface User {
   email: string;
   telefone: string;
   papel: UserRole;
+  is_admin: boolean;
   email_verificado?: boolean;
   telefone_verificado?: boolean;
   identidade_verificada?: boolean;
@@ -54,8 +55,9 @@ export interface ProductImage {
   ordem: number;
 }
 
-export type ModalidadeVenda = 'UNIDADE' | 'PESO_KG' | 'VALOR_DINHEIRO' | 'PESO_E_VALOR';
-export type ModoCompra = 'UNIDADE' | 'PESO_KG' | 'VALOR_DINHEIRO';
+export type UnitType = 'kg' | 'un';
+export type ModalidadeVenda = 'UNIDADE' | 'PESO_KG';
+export type ModoCompra = 'UNIDADE' | 'PESO_KG';
 
 export interface Product {
   id: string;
@@ -66,6 +68,7 @@ export interface Product {
   descricao_completa: string;
   observacao_curta: string;
   palavras_chave: string;
+  unit_type: UnitType;
   preco_centavos: number;
   preco_promocional_centavos: number | null;
   preco_vigente_centavos: number;
@@ -89,6 +92,7 @@ export interface CartItem {
   produto_id: string;
   produto_nome: string;
   observacao_curta: string;
+  unit_type: UnitType;
   unidade_venda: string;
   modalidade_venda: ModalidadeVenda;
   precisao_pesagem: number;
@@ -113,6 +117,9 @@ export interface CartState {
 
 export interface Address {
   id?: string;
+  nome_destinatario?: string;
+  telefone_contato?: string;
+  email_comprovante?: string;
   cep: string;
   rua: string;
   numero: string;
@@ -129,6 +136,7 @@ export interface OrderItem {
   nome_produto_snapshot: string;
   observacao_snapshot: string;
   unidade_snapshot: string;
+  unit_type?: UnitType;
   modo_compra: ModoCompra;
   quantidade: number;
   valor_desejado_centavos: number | null;

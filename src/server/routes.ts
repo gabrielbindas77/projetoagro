@@ -1,6 +1,5 @@
 import crypto from 'crypto';
 import path from 'path';
-import bcrypt from 'bcryptjs';
 import express from 'express';
 import multer from 'multer';
 import QRCode from 'qrcode';
@@ -16,15 +15,13 @@ import {
 } from './auth.ts';
 import { uploadsDir } from './db.ts';
 import {
+  authenticateUserByCpfPassword,
   checkRateLimit,
   clearFailedAttempts,
   createCategoria,
-  createCliente,
   createProduto,
   deleteOrInactivateProduto,
   deleteProductImage,
-  findAuthAccountByCpf,
-  findUserByCpfOrEmail,
   getCartPayload,
   getConfigMap,
   getProdutoById,
@@ -32,15 +29,13 @@ import {
   getUserProfileById,
   listCategorias,
   listProdutos,
-  markClienteVerified,
   recordFailedAttempt,
-  saveVerificationCode,
+  registerUserByCpfPassword,
   setPrimaryProductImage,
-  updateClientePasswordByCpf,
   updateConfigMap,
   updateProduto,
+  updateProfileContactInfo,
   uploadProductImages,
-  verifyAndConsumeCode,
 } from './store-repo.ts';
 import {
   addConversationMessageRepo,
@@ -68,16 +63,11 @@ import {
 } from './store-repo-orders.ts';
 import {
   cleanDigits,
-  dispatchEmailCode,
-  dispatchPhoneCode,
-  generateNumericCode,
-  hashCode,
   isValidBrazilPhone,
   isValidCPF,
   isValidEmail,
   normalizeText,
   validatePasswordStrength,
-  verifyExternalCpfIdentity,
   verifyMercadoPagoWebhookSignature,
 } from './utils.ts';
 import { broadcastChatMessage, broadcastOrderUpdate } from './ws.ts';
@@ -107,8 +97,7 @@ const upload = multer({
 function computeCartItemValues(
   produto: any,
   modoCompra: string,
-  quantidadeInput?: number,
-  valorDesejadoCentavosInput?: number
+  quantidadeInput?: number
 ) {
   const precoUnitario = Number(produto.preco_vigente_centavos ?? produto.preco_centavos);
   const precisao = Number(produto.precisao_pesagem ?? 3);
@@ -117,7 +106,7 @@ function computeCartItemValues(
     const qtd = Math.floor(Number(quantidadeInput || 0));
     if (qtd < 1) throw new Error('Quantidade mínima é 1 unidade.');
     if (qtd > Number(produto.estoque_quantidade)) {
-      throw new Error(`Estoque insuficiente. Disponível: ${produto.estoque_quantidade} ${produto.unidade_venda}.`);
+      throw new Error(`Estoque insuficiente. Disponível: ${produto.estoque_quantidade} un.`);
     }
     return {
       quantidade: qtd,
@@ -141,27 +130,7 @@ function computeCartItemValues(
     };
   }
 
-  if (modoCompra === 'VALOR_DINHEIRO') {
-    const valorCentavos = Math.round(Number(valorDesejadoCentavosInput || 0));
-    if (valorCentavos < 100) throw new Error('O valor mínimo para compra por valor é R$ 1,00.');
-    if (precoUnitario <= 0) throw new Error('Preço do produto inválido.');
-    const fator = Math.pow(10, precisao);
-    const qtd = Math.round((valorCentavos / precoUnitario) * fator) / fator;
-    if (qtd <= 0) throw new Error('Valor insuficiente para a menor fração de pesagem.');
-    if (qtd > Number(produto.estoque_quantidade)) {
-      throw new Error(
-        `O valor informado equivale a ${qtd.toFixed(precisao)} kg, acima do estoque disponível (${produto.estoque_quantidade} kg).`
-      );
-    }
-    return {
-      quantidade: qtd,
-      valorDesejadoCentavos: valorCentavos,
-      precoUnitarioSnapshot: precoUnitario,
-      subtotalCentavos: valorCentavos,
-    };
-  }
-
-  throw new Error('Modalidade de compra inválida.');
+  throw new Error('Modalidade de compra inválida. Use UNIDADE ou PESO_KG.');
 }
 
 // ==============================================================================
@@ -188,7 +157,7 @@ apiRouter.get('/config/public', async (_req, res) => {
   });
 });
 
-apiRouter.get('/cep/:cep', requireAuth, async (req, res) => {
+apiRouter.get('/cep/:cep', optionalAuth, async (req, res) => {
   const cep = cleanDigits(req.params.cep);
   if (cep.length !== 8) {
     return res.status(400).json({ error: 'CEP inválido. Informe 8 dígitos.' });
@@ -216,7 +185,7 @@ apiRouter.get('/cep/:cep', requireAuth, async (req, res) => {
 });
 
 // ==============================================================================
-// AUTHENTICATION, VERIFICATION & PASSWORD RECOVERY
+// UNIFIED AUTHENTICATION (Exclusively CPF + Password, 1 registration per CPF)
 // ==============================================================================
 
 apiRouter.post('/auth/register', async (req, res) => {
@@ -224,145 +193,54 @@ apiRouter.post('/auth/register', async (req, res) => {
     const {
       nome_completo,
       cpf: rawCpf,
-      email: rawEmail,
       telefone: rawTelefone,
       senha,
       confirmacao_senha,
     } = req.body || {};
 
-    if (!nome_completo || String(nome_completo).trim().length < 3) {
-      return res.status(400).json({ error: 'Informe o nome completo válido.' });
-    }
     const cpf = cleanDigits(String(rawCpf || ''));
     if (!isValidCPF(cpf)) {
-      return res.status(400).json({ error: 'CPF inválido. Verifique os dígitos informados.' });
+      return res.status(400).json({ error: 'CPF inválido. Verifique os 11 dígitos informados.' });
     }
-    const email = String(rawEmail || '').trim().toLowerCase();
-    if (!isValidEmail(email)) {
-      return res.status(400).json({ error: 'E-mail em formato inválido.' });
-    }
-    const telefone = cleanDigits(String(rawTelefone || ''));
-    if (!isValidBrazilPhone(telefone)) {
-      return res.status(400).json({ error: 'Telefone inválido. Informe DDD válido + número.' });
-    }
+
     const pwCheck = validatePasswordStrength(String(senha || ''));
     if (!pwCheck.valid) {
       return res.status(400).json({ error: pwCheck.errors[0], details: pwCheck.errors });
     }
-    if (senha !== confirmacao_senha) {
+    if (confirmacao_senha !== undefined && senha !== confirmacao_senha) {
       return res.status(400).json({ error: 'A confirmação da senha não confere.' });
     }
 
-    const dup = await findUserByCpfOrEmail(cpf, email);
-    if (dup.cpfExists) {
-      return res.status(409).json({ error: 'Este CPF já está cadastrado no sistema.' });
-    }
-    if (dup.emailExists) {
-      return res.status(409).json({ error: 'Este e-mail já está cadastrado no sistema.' });
-    }
-
-    const identityCheck = await verifyExternalCpfIdentity(cpf, String(nome_completo).trim());
-    if (identityCheck.checked && !identityCheck.verified) {
-      return res.status(422).json({
-        error: `Falha na validação cadastral do CPF: ${identityCheck.providerMessage}`,
-      });
-    }
-
-    const senhaHash = bcrypt.hashSync(String(senha), 10);
-    const created = await createCliente({
-      nome_completo: String(nome_completo).trim(),
+    const created = await registerUserByCpfPassword({
       cpf,
-      email,
-      telefone,
-      senha_hash: senhaHash,
-      identidade_verificada: identityCheck.verified,
+      senha: String(senha),
+      nome_completo: nome_completo ? String(nome_completo).trim() : undefined,
+      telefone: rawTelefone ? String(rawTelefone) : undefined,
     });
-
-    const emailCode = generateNumericCode();
-    const phoneCode = generateNumericCode();
-    const expira = new Date(Date.now() + 15 * 60 * 1000).toISOString();
-
-    await Promise.all([
-      saveVerificationCode(email, 'EMAIL', hashCode(emailCode), expira),
-      saveVerificationCode(telefone, 'TELEFONE', hashCode(phoneCode), expira),
-    ]);
-
-    const [emailDispatch, phoneDispatch] = await Promise.all([
-      dispatchEmailCode(email, emailCode, 'verificacao'),
-      dispatchPhoneCode(telefone, phoneCode),
-    ]);
 
     const token = signSessionToken({
       id: created.id,
-      cpf,
-      nome: String(nome_completo).trim(),
-      email,
-      papel: 'CLIENTE',
+      cpf: created.cpf,
+      nome: created.nome_completo,
+      email: created.email,
+      papel: created.papel,
     });
     setSessionCookie(req, res, token);
 
     res.status(201).json({
       token,
       user: {
-        id: created.id,
-        nome_completo: String(nome_completo).trim(),
-        cpf,
-        email,
-        telefone,
-        papel: 'CLIENTE',
-        email_verificado: false,
-        telefone_verificado: false,
-        identidade_verificada: identityCheck.verified,
-      },
-      verificacao: {
-        email: emailDispatch,
-        telefone: phoneDispatch,
-        identidade: identityCheck.providerMessage,
+        ...created,
+        email_verificado: true,
+        telefone_verificado: true,
+        identidade_verificada: true,
       },
     });
   } catch (err: any) {
-    console.error('Erro no cadastro:', err);
-    res.status(500).json({ error: err?.message || 'Erro interno ao concluir o cadastro.' });
+    const msg = err?.message || 'Erro ao concluir o cadastro.';
+    const status = msg.toLowerCase().includes('já está cadastrado') ? 409 : 500;
+    res.status(status).json({ error: msg });
   }
-});
-
-apiRouter.post('/auth/verification/send', requireCliente, async (req: AuthRequest, res) => {
-  try {
-    const tipo = req.body?.tipo === 'TELEFONE' ? 'TELEFONE' : 'EMAIL';
-    const cliente = await getUserProfileById(req.user!.id, 'CLIENTE');
-    if (!cliente) return res.status(404).json({ error: 'Cliente não encontrado.' });
-
-    const code = generateNumericCode();
-    const expira = new Date(Date.now() + 15 * 60 * 1000).toISOString();
-    const alvo = tipo === 'EMAIL' ? cliente.email : cliente.telefone;
-
-    await saveVerificationCode(alvo, tipo, hashCode(code), expira);
-    const dispatch =
-      tipo === 'EMAIL'
-        ? await dispatchEmailCode(cliente.email, code, 'verificacao')
-        : await dispatchPhoneCode(cliente.telefone, code);
-
-    res.json({ ok: true, ...dispatch });
-  } catch {
-    res.status(500).json({ error: 'Falha ao enviar código de confirmação.' });
-  }
-});
-
-apiRouter.post('/auth/verification/confirm', requireCliente, async (req: AuthRequest, res) => {
-  const tipo = req.body?.tipo === 'TELEFONE' ? 'TELEFONE' : 'EMAIL';
-  const codigo = String(req.body?.codigo || '').trim();
-  if (!/^\d{6}$/.test(codigo)) {
-    return res.status(400).json({ error: 'Informe o código numérico de 6 dígitos.' });
-  }
-  const cliente = await getUserProfileById(req.user!.id, 'CLIENTE');
-  if (!cliente) return res.status(404).json({ error: 'Cliente não encontrado.' });
-
-  const alvo = tipo === 'EMAIL' ? cliente.email : cliente.telefone;
-  const check = await verifyAndConsumeCode(alvo, tipo, hashCode(codigo));
-  if (!check.ok) return res.status(400).json({ error: check.error });
-
-  await markClienteVerified(cliente.id, tipo);
-  res.json({ ok: true, tipo, verificado: true });
 });
 
 apiRouter.post('/auth/login', async (req, res) => {
@@ -381,35 +259,29 @@ apiRouter.post('/auth/login', async (req, res) => {
     });
   }
 
-  const found = await findAuthAccountByCpf(cpf);
-  if (!found || !bcrypt.compareSync(senha, found.account.senha_hash)) {
+  const authenticated = await authenticateUserByCpfPassword(cpf, senha);
+  if (!authenticated) {
     await recordFailedAttempt(rateKey);
     return res.status(401).json({ error: 'CPF ou senha inválidos.' });
   }
 
   await clearFailedAttempts(rateKey);
-  const acc = found.account;
   const token = signSessionToken({
-    id: acc.id,
-    cpf: acc.cpf,
-    nome: acc.nome_completo,
-    email: acc.email,
-    papel: found.papel,
+    id: authenticated.id,
+    cpf: authenticated.cpf,
+    nome: authenticated.nome_completo,
+    email: authenticated.email,
+    papel: authenticated.papel,
   });
   setSessionCookie(req, res, token);
 
   res.json({
     token,
     user: {
-      id: acc.id,
-      nome_completo: acc.nome_completo,
-      cpf: acc.cpf,
-      email: acc.email,
-      telefone: acc.telefone,
-      papel: found.papel,
-      email_verificado: Boolean(acc.email_verificado),
-      telefone_verificado: Boolean(acc.telefone_verificado),
-      identidade_verificada: Boolean(acc.identidade_verificada),
+      ...authenticated,
+      email_verificado: true,
+      telefone_verificado: true,
+      identidade_verificada: true,
     },
   });
 });
@@ -425,53 +297,16 @@ apiRouter.get('/auth/me', optionalAuth, async (req: AuthRequest, res) => {
   res.json({ user: profile });
 });
 
-apiRouter.post('/auth/password-recovery/request', async (req, res) => {
-  const cpf = cleanDigits(String(req.body?.cpf || ''));
-  if (!isValidCPF(cpf)) return res.status(400).json({ error: 'Informe um CPF válido.' });
-
-  const found = await findAuthAccountByCpf(cpf);
-  if (!found || found.papel !== 'CLIENTE') {
-    return res.json({
-      ok: true,
-      note: 'Se o CPF estiver cadastrado, enviaremos um código de recuperação para o e-mail vinculado.',
-    });
-  }
-
-  const code = generateNumericCode();
-  const expira = new Date(Date.now() + 15 * 60 * 1000).toISOString();
-  await saveVerificationCode(cpf, 'RECUPERACAO_SENHA', hashCode(code), expira);
-  const dispatch = await dispatchEmailCode(found.account.email, code, 'recuperacao');
-  res.json({ ok: true, sent: dispatch.sent, channel: dispatch.channel, note: dispatch.note });
-});
-
-apiRouter.post('/auth/password-recovery/reset', async (req, res) => {
-  const cpf = cleanDigits(String(req.body?.cpf || ''));
-  const codigo = String(req.body?.codigo || '').trim();
-  const novaSenha = String(req.body?.nova_senha || '');
-
-  if (!isValidCPF(cpf) || !/^\d{6}$/.test(codigo)) {
-    return res.status(400).json({ error: 'CPF ou código de 6 dígitos inválido.' });
-  }
-  const pw = validatePasswordStrength(novaSenha);
-  if (!pw.valid) return res.status(400).json({ error: pw.errors[0] });
-
-  const check = await verifyAndConsumeCode(cpf, 'RECUPERACAO_SENHA', hashCode(codigo));
-  if (!check.ok) return res.status(400).json({ error: check.error });
-
-  await updateClientePasswordByCpf(cpf, bcrypt.hashSync(novaSenha, 10));
-  res.json({ ok: true });
-});
-
 // ==============================================================================
-// AUTHENTICATED CATALOG & SMART SEARCH (Requires login before viewing store)
+// OPEN PUBLIC CATALOG & SMART SEARCH (Visible immediately without login)
 // ==============================================================================
 
-apiRouter.get('/categorias', requireAuth, async (_req, res) => {
+apiRouter.get('/categorias', optionalAuth, async (_req, res) => {
   const rows = await listCategorias();
   res.json(rows);
 });
 
-apiRouter.get('/produtos', requireAuth, async (req: AuthRequest, res) => {
+apiRouter.get('/produtos', optionalAuth, async (req: AuthRequest, res) => {
   const cfg = await getConfigMap();
   const showOutOfStock = req.user?.papel === 'ADMIN' || cfg.exibir_esgotados_catalogo !== 'false';
 
@@ -531,7 +366,7 @@ apiRouter.get('/produtos', requireAuth, async (req: AuthRequest, res) => {
   res.json(products);
 });
 
-apiRouter.get('/produtos/:id', requireAuth, async (req, res) => {
+apiRouter.get('/produtos/:id', optionalAuth, async (req, res) => {
   const prod = await getProdutoById(req.params.id);
   if (!prod || prod.situacao === 'INATIVO') {
     return res.status(404).json({ error: 'Produto não encontrado.' });
@@ -549,7 +384,7 @@ apiRouter.get('/carrinho', requireCliente, async (req: AuthRequest, res) => {
 
 apiRouter.post('/carrinho/itens', requireCliente, async (req: AuthRequest, res) => {
   try {
-    const { produtoId, modoCompra, quantidade, valorDesejadoCentavos } = req.body || {};
+    const { produtoId, modoCompra, quantidade } = req.body || {};
     const produto = await getProdutoById(produtoId);
     if (!produto || produto.situacao === 'INATIVO') {
       return res.status(404).json({ error: 'Produto não encontrado.' });
@@ -557,21 +392,20 @@ apiRouter.post('/carrinho/itens', requireCliente, async (req: AuthRequest, res) 
     if (produto.situacao === 'ESGOTADO' || produto.estoque_quantidade <= 0) {
       return res.status(400).json({ error: 'Produto esgotado no momento.' });
     }
-    if (produto.modalidade_venda === 'UNIDADE' && modoCompra !== 'UNIDADE') {
-      return res.status(400).json({ error: 'Este produto é vendido apenas por unidade.' });
-    }
-    if (produto.modalidade_venda === 'PESO_KG' && modoCompra !== 'PESO_KG') {
-      return res.status(400).json({ error: 'Este produto é vendido apenas por quilo.' });
-    }
-    if (produto.modalidade_venda === 'VALOR_DINHEIRO' && modoCompra !== 'VALOR_DINHEIRO') {
-      return res.status(400).json({ error: 'Este produto é vendido apenas por valor em dinheiro.' });
-    }
-    if (produto.modalidade_venda === 'PESO_E_VALOR' && !['PESO_KG', 'VALOR_DINHEIRO'].includes(modoCompra)) {
-      return res.status(400).json({ error: 'Selecione compra por quilo ou por valor em R$.' });
+
+    const expectedMode = produto.unit_type === 'kg' ? 'PESO_KG' : 'UNIDADE';
+    const resolvedMode = modoCompra || expectedMode;
+    if (resolvedMode !== expectedMode) {
+      return res.status(400).json({
+        error:
+          expectedMode === 'UNIDADE'
+            ? 'Este produto é vendido apenas por unidade.'
+            : 'Este produto é vendido apenas por quilo (kg).',
+      });
     }
 
-    const calc = computeCartItemValues(produto, modoCompra, quantidade, valorDesejadoCentavos);
-    await addOrMergeCartItem(req.user!.id, produto, modoCompra, calc, computeCartItemValues);
+    const calc = computeCartItemValues(produto, resolvedMode, quantidade);
+    await addOrMergeCartItem(req.user!.id, produto, resolvedMode, calc, computeCartItemValues);
     res.json(await getCartPayload(req.user!.id));
   } catch (err: any) {
     res.status(400).json({ error: err?.message || 'Não foi possível adicionar ao carrinho.' });
@@ -700,8 +534,8 @@ apiRouter.get('/pagamentos/mp/parcelas', requireAuth, async (req, res) => {
   }
 });
 
-apiRouter.post('/pedidos', requireCliente, async (req: AuthRequest, res) => {
-  const { endereco, formaPagamento, observacoes, cardPayment } = req.body || {};
+async function handleCreateOrder(req: AuthRequest, res: express.Response) {
+  const { endereco, formaPagamento, observacoes, cardPayment, itens } = req.body || {};
 
   if (!['PIX', 'CARTAO_CREDITO', 'DINHEIRO_NA_ENTREGA'].includes(formaPagamento)) {
     return res.status(400).json({ error: 'Forma de pagamento inválida.' });
@@ -717,16 +551,15 @@ apiRouter.post('/pedidos', requireCliente, async (req: AuthRequest, res) => {
   const cliente = await getUserProfileById(req.user!.id, 'CLIENTE');
   if (!cliente) return res.status(404).json({ error: 'Cliente não encontrado.' });
 
+  await updateProfileContactInfo(cliente.id, {
+    full_name: endereco?.nome_destinatario,
+    phone: endereco?.telefone_contato,
+  });
+
   const cfg = await getConfigMap();
   const adminPixKey = String(cfg.pix_key || '').trim();
   const adminPixKeyType = String(cfg.pix_key_type || 'CPF').trim();
   const adminPixRecipient = String(cfg.pix_recipient_name || 'Agro Marconato Agropecuária').trim();
-
-  if (formaPagamento === 'PIX' && !adminPixKey) {
-    return res.status(400).json({
-      error: 'Chave Pix de recebimento ainda não cadastrada pelo administrador (/admin > Configurações).',
-    });
-  }
 
   const numParcelas = 1;
 
@@ -740,6 +573,7 @@ apiRouter.post('/pedidos', requireCliente, async (req: AuthRequest, res) => {
       numParcelas,
       observacoes: String(observacoes || '').trim(),
       computeFn: computeCartItemValues,
+      directItems: Array.isArray(itens) ? itens : undefined,
     });
   } catch (err: any) {
     return res.status(409).json({ error: err?.message || 'Não foi possível criar o pedido.' });
@@ -762,8 +596,16 @@ apiRouter.post('/pedidos', requireCliente, async (req: AuthRequest, res) => {
   } else {
     const appUrl = (process.env.APP_URL || '').replace(/\/$/, '');
     const notificationUrl = appUrl ? `${appUrl}/api/webhooks/mercadopago` : undefined;
-    const [firstName, ...restName] = cliente.nome_completo.split(' ');
+    const displayName = String(endereco?.nome_destinatario || cliente.nome_completo || 'Cliente').trim();
+    const [firstName, ...restName] = displayName.split(' ');
     const lastName = restName.join(' ') || firstName;
+    const rawEmail = String(endereco?.email_comprovante || '').trim().toLowerCase();
+    const payerEmail =
+      isValidEmail(rawEmail) && !rawEmail.endsWith('.local')
+        ? rawEmail
+        : isValidEmail(cliente.email) && !cliente.email.endsWith('.local')
+        ? cliente.email
+        : `cliente-${cliente.cpf}@agromarconato.com.br`;
 
     try {
       const mpBody: any = {
@@ -778,7 +620,7 @@ apiRouter.post('/pedidos', requireCliente, async (req: AuthRequest, res) => {
           admin_pix_recipient: adminPixRecipient,
         },
         payer: {
-          email: cliente.email,
+          email: payerEmail,
           first_name: firstName,
           last_name: lastName,
           identification: { type: 'CPF', number: cliente.cpf },
@@ -847,7 +689,10 @@ apiRouter.post('/pedidos', requireCliente, async (req: AuthRequest, res) => {
   const fullOrder = await getOrderByIdRepo(createdOrder.id);
   broadcastOrderUpdate(cliente.id, fullOrder);
   res.status(201).json({ pedido: fullOrder, pagamento: paymentRecord, paymentNotice });
-});
+}
+
+apiRouter.post('/pedidos', requireCliente, handleCreateOrder);
+apiRouter.post('/checkout', requireCliente, handleCreateOrder);
 
 apiRouter.get('/pedidos', requireCliente, async (req: AuthRequest, res) => {
   res.json(await listOrdersRepo(req.user!.id));
@@ -997,10 +842,14 @@ apiRouter.get('/admin/produtos', requireAdmin, async (_req, res) => {
 apiRouter.post('/admin/produtos', requireAdmin, async (req, res) => {
   try {
     const b = req.body || {};
-    if (!b.categoria_id || !b.nome || !b.descricao_completa || !b.observacao_curta || b.preco_centavos === undefined) {
-      return res.status(400).json({ error: 'Preencha todos os campos obrigatórios do produto.' });
+    if (!b.categoria_id || !b.nome || b.preco_centavos === undefined) {
+      return res.status(400).json({ error: 'Preencha categoria, nome e preço do produto.' });
     }
-    const created = await createProduto(b);
+    const created = await createProduto({
+      ...b,
+      observacao_curta: b.observacao_curta || b.nome,
+      descricao_completa: b.descricao_completa || b.observacao_curta || b.nome,
+    });
     res.status(201).json(created);
   } catch (err: any) {
     res.status(400).json({ error: err?.message || 'Erro ao cadastrar produto.' });
@@ -1107,29 +956,28 @@ apiRouter.get('/admin/clientes', requireAdmin, async (_req, res) => {
 });
 
 apiRouter.post('/admin/clientes', requireAdmin, async (req, res) => {
-  const { nome_completo, cpf: rawCpf, email: rawEmail, telefone: rawTel, senha } = req.body || {};
+  const { nome_completo, cpf: rawCpf, telefone: rawTel, senha } = req.body || {};
   const cpf = cleanDigits(String(rawCpf || ''));
-  const email = String(rawEmail || '').trim().toLowerCase();
   const telefone = cleanDigits(String(rawTel || ''));
 
-  if (!nome_completo || !isValidCPF(cpf) || !isValidEmail(email) || !isValidBrazilPhone(telefone)) {
-    return res.status(400).json({ error: 'Dados inválidos para cadastro de cliente.' });
+  if (!nome_completo || !isValidCPF(cpf)) {
+    return res.status(400).json({ error: 'Nome e CPF válido são obrigatórios.' });
   }
-  const pw = validatePasswordStrength(String(senha || 'Agro@2026!Cliente'));
+  const pw = validatePasswordStrength(String(senha || '123456'));
   if (!pw.valid) return res.status(400).json({ error: pw.errors[0] });
 
-  const dup = await findUserByCpfOrEmail(cpf, email);
-  if (dup.cpfExists || dup.emailExists) return res.status(409).json({ error: 'CPF ou e-mail já cadastrado.' });
-
-  const created = await createCliente({
-    nome_completo: String(nome_completo).trim(),
-    cpf,
-    email,
-    telefone,
-    senha_hash: bcrypt.hashSync(String(senha || 'Agro@2026!Cliente'), 10),
-    identidade_verificada: false,
-  });
-  res.status(201).json(created);
+  try {
+    const created = await registerUserByCpfPassword({
+      cpf,
+      senha: String(senha || '123456'),
+      nome_completo: String(nome_completo).trim(),
+      telefone,
+    });
+    res.status(201).json(created);
+  } catch (err: any) {
+    const msg = err?.message || 'Erro ao cadastrar cliente.';
+    res.status(msg.toLowerCase().includes('já está cadastrado') ? 409 : 400).json({ error: msg });
+  }
 });
 
 apiRouter.get('/admin/administradores', requireAdmin, async (_req, res) => {

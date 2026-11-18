@@ -12,9 +12,9 @@ import {
   Check,
   AlertTriangle,
   Send,
-  ShieldCheck,
 } from 'lucide-react';
 import { apiFetch, getAuthToken } from '../lib/api.ts';
+import { getSupabaseBrowserClient, isFrontendSupabaseConfigured } from '../lib/supabase.ts';
 import {
   DELIVERY_STATUS_LABEL,
   FINANCE_STATUS_LABEL,
@@ -30,23 +30,23 @@ import type {
   Category,
   ChatMessage,
   Conversation,
-  ModalidadeVenda,
   Order,
   PixKeyType,
   Product,
   PublicConfig,
+  UnitType,
   User,
 } from '../types.ts';
 
 interface AdminPanelProps {
   user: User | null;
-  onOpenAuth: () => void;
   onConfigUpdated: () => void;
 }
 
 type AdminTab = 'dashboard' | 'produtos' | 'pedidos' | 'clientes' | 'chat' | 'config';
 
-export function AdminPanel({ user, onOpenAuth, onConfigUpdated }: AdminPanelProps) {
+export function AdminPanel({ user, onConfigUpdated }: AdminPanelProps) {
+  const isAdmin = Boolean(user?.is_admin || user?.papel === 'ADMIN');
   const [tab, setTab] = useState<AdminTab>('dashboard');
   const [dashboard, setDashboard] = useState<AdminDashboard | null>(null);
   const [produtos, setProdutos] = useState<Product[]>([]);
@@ -75,9 +75,7 @@ export function AdminPanel({ user, onOpenAuth, onConfigUpdated }: AdminPanelProp
     preco_promocional_reais: '',
     estoque_quantidade: '10',
     estoque_baixo_limite: '5',
-    unidade_venda: 'UN',
-    modalidade_venda: 'UNIDADE' as ModalidadeVenda,
-    precisao_pesagem: '3',
+    unit_type: 'un' as UnitType,
     destaque: false,
     oferta: false,
   });
@@ -112,7 +110,7 @@ export function AdminPanel({ user, onOpenAuth, onConfigUpdated }: AdminPanelProp
   });
 
   async function loadAllAdminData() {
-    if (!user || user.papel !== 'ADMIN') return;
+    if (!isAdmin) return;
     try {
       const [dash, prods, cats, orders, clis, adms, convs, pubCfg, admCfg] = await Promise.all([
         apiFetch<AdminDashboard>('/api/admin/dashboard'),
@@ -134,7 +132,7 @@ export function AdminPanel({ user, onOpenAuth, onConfigUpdated }: AdminPanelProp
       setConversas(convs);
       setConfig(pubCfg);
       setCfgForm({
-        frete_reais: ((admCfg?.frete_padrao_centavos ?? pubCfg.frete_padrao_centavos) / 100).toFixed(2),
+        frete_reais: ((admCfg?.frete_padrao_centavos ?? 499) / 100).toFixed(2),
         exibir_esgotados_catalogo: admCfg?.exibir_esgotados_catalogo ?? pubCfg.exibir_esgotados_catalogo,
         whatsapp_loja: admCfg?.whatsapp_loja || pubCfg.whatsapp_loja,
         precisao_pesagem_padrao: String(admCfg?.precisao_pesagem_padrao ?? pubCfg.precisao_pesagem_padrao),
@@ -155,16 +153,16 @@ export function AdminPanel({ user, onOpenAuth, onConfigUpdated }: AdminPanelProp
 
   useEffect(() => {
     loadAllAdminData();
-  }, [user]);
+  }, [isAdmin]);
 
   useEffect(() => {
     if (!activeChatId) return;
     apiFetch<ChatMessage[]>(`/api/conversas/${activeChatId}/mensagens`).then(setChatMessages);
   }, [activeChatId]);
 
-  // WebSocket listener for real-time admin chat & order updates
+  // WebSocket + Supabase Realtime listeners for real-time orders & chat
   useEffect(() => {
-    if (!user || user.papel !== 'ADMIN') return;
+    if (!isAdmin) return;
     const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     const tok = getAuthToken();
     const qs = tok ? `?token=${encodeURIComponent(tok)}` : '';
@@ -183,33 +181,41 @@ export function AdminPanel({ user, onOpenAuth, onConfigUpdated }: AdminPanelProp
           apiFetch<Order[]>('/api/admin/pedidos').then(setPedidos);
           apiFetch<AdminDashboard>('/api/admin/dashboard').then(setDashboard);
           if (data.pedido?.numero_pedido) {
-            showNotice(`Pedido #${data.pedido.numero_pedido} atualizado em tempo real (${FINANCE_STATUS_LABEL[data.pedido.situacao_financeira] || data.pedido.situacao_financeira}).`);
+            showNotice(
+              `Pedido #${data.pedido.numero_pedido} atualizado em tempo real (${
+                FINANCE_STATUS_LABEL[data.pedido.situacao_financeira] || data.pedido.situacao_financeira
+              }).`
+            );
           }
         }
       } catch {
         // ignore
       }
     };
-    return () => ws.close();
-  }, [user, activeChatId]);
 
-  if (!user || user.papel !== 'ADMIN') {
-    return (
-      <div className="max-w-lg mx-auto px-4 py-20 text-center space-y-4">
-        <ShieldCheck className="w-10 h-10 text-[#143824] mx-auto" />
-        <h1 className="text-2xl font-bold text-zinc-900">Painel Administrativo</h1>
-        <p className="text-sm text-zinc-600">
-          Área restrita a administradores autenticados da Agro Marconato Agropecuária.
-        </p>
-        <button
-          type="button"
-          onClick={onOpenAuth}
-          className="px-5 py-2.5 bg-[#143824] text-white text-sm font-semibold rounded-lg cursor-pointer"
-        >
-          Entrar como Administrador
-        </button>
-      </div>
-    );
+    const sb = isFrontendSupabaseConfigured() ? getSupabaseBrowserClient() : null;
+    const channel = sb
+      ? sb
+          .channel('admin-orders-realtime')
+          .on(
+            'postgres_changes',
+            { event: '*', schema: 'public', table: 'orders' },
+            () => {
+              apiFetch<Order[]>('/api/admin/pedidos').then(setPedidos).catch(() => {});
+              apiFetch<AdminDashboard>('/api/admin/dashboard').then(setDashboard).catch(() => {});
+            }
+          )
+          .subscribe()
+      : null;
+
+    return () => {
+      ws.close();
+      if (channel && sb) sb.removeChannel(channel);
+    };
+  }, [isAdmin, activeChatId]);
+
+  if (!isAdmin) {
+    return null;
   }
 
   function showNotice(msg: string) {
@@ -237,9 +243,10 @@ export function AdminPanel({ user, onOpenAuth, onConfigUpdated }: AdminPanelProp
         preco_promocional_centavos: promoCentavos,
         estoque_quantidade: Number(prodForm.estoque_quantidade),
         estoque_baixo_limite: Number(prodForm.estoque_baixo_limite),
-        unidade_venda: prodForm.unidade_venda,
-        modalidade_venda: prodForm.modalidade_venda,
-        precisao_pesagem: Number(prodForm.precisao_pesagem),
+        unit_type: prodForm.unit_type,
+        unidade_venda: prodForm.unit_type === 'kg' ? 'KG' : 'UN',
+        modalidade_venda: prodForm.unit_type === 'kg' ? 'PESO_KG' : 'UNIDADE',
+        precisao_pesagem: prodForm.unit_type === 'kg' ? 3 : 0,
         permite_parcelamento: false,
         max_parcelas_produto: 1,
         destaque: prodForm.destaque,
@@ -280,9 +287,7 @@ export function AdminPanel({ user, onOpenAuth, onConfigUpdated }: AdminPanelProp
         preco_promocional_reais: '',
         estoque_quantidade: '10',
         estoque_baixo_limite: '5',
-        unidade_venda: 'UN',
-        modalidade_venda: 'UNIDADE',
-        precisao_pesagem: '3',
+        unit_type: 'un',
         destaque: false,
         oferta: false,
       });
@@ -307,9 +312,7 @@ export function AdminPanel({ user, onOpenAuth, onConfigUpdated }: AdminPanelProp
         : '',
       estoque_quantidade: String(p.estoque_quantidade),
       estoque_baixo_limite: String(p.estoque_baixo_limite),
-      unidade_venda: p.unidade_venda,
-      modalidade_venda: p.modalidade_venda,
-      precisao_pesagem: String(p.precisao_pesagem),
+      unit_type: p.unit_type === 'kg' || p.modalidade_venda === 'PESO_KG' ? 'kg' : 'un',
       destaque: p.destaque === 1,
       oferta: p.oferta === 1,
     });
@@ -646,22 +649,19 @@ export function AdminPanel({ user, onOpenAuth, onConfigUpdated }: AdminPanelProp
                 </select>
               </div>
               <div>
-                <label className="block text-xs font-medium text-zinc-700 mb-1">Modalidade de venda</label>
+                <label className="block text-xs font-medium text-zinc-700 mb-1">Tipo de venda</label>
                 <select
-                  value={prodForm.modalidade_venda}
+                  value={prodForm.unit_type}
                   onChange={(e) =>
                     setProdForm({
                       ...prodForm,
-                      modalidade_venda: e.target.value as ModalidadeVenda,
-                      unidade_venda: e.target.value === 'UNIDADE' ? 'UN' : 'KG',
+                      unit_type: e.target.value as UnitType,
                     })
                   }
                   className="w-full px-3 py-2 text-sm border border-zinc-300 rounded-lg"
                 >
-                  <option value="UNIDADE">Por unidade</option>
-                  <option value="PESO_KG">Por quilo (kg)</option>
-                  <option value="VALOR_DINHEIRO">Por valor em dinheiro (R$)</option>
-                  <option value="PESO_E_VALOR">Por quilo (kg) e valor em dinheiro (R$)</option>
+                  <option value="un">Por Unidade (un)</option>
+                  <option value="kg">Por Quilo (Kg)</option>
                 </select>
               </div>
             </div>
@@ -693,7 +693,9 @@ export function AdminPanel({ user, onOpenAuth, onConfigUpdated }: AdminPanelProp
 
             <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
               <div>
-                <label className="block text-xs font-medium text-zinc-700 mb-1">Preço (R$)</label>
+                <label className="block text-xs font-medium text-zinc-700 mb-1">
+                  {prodForm.unit_type === 'kg' ? 'Preço por Kg (R$)' : 'Preço por Unidade (R$)'}
+                </label>
                 <input
                   type="text"
                   required
@@ -714,10 +716,12 @@ export function AdminPanel({ user, onOpenAuth, onConfigUpdated }: AdminPanelProp
                 />
               </div>
               <div>
-                <label className="block text-xs font-medium text-zinc-700 mb-1">Estoque inicial</label>
+                <label className="block text-xs font-medium text-zinc-700 mb-1">
+                  {prodForm.unit_type === 'kg' ? 'Estoque inicial (Kg)' : 'Estoque inicial (Un)'}
+                </label>
                 <input
                   type="number"
-                  step="0.001"
+                  step={prodForm.unit_type === 'kg' ? '0.05' : '1'}
                   required
                   value={prodForm.estoque_quantidade}
                   onChange={(e) => setProdForm({ ...prodForm, estoque_quantidade: e.target.value })}
@@ -725,13 +729,13 @@ export function AdminPanel({ user, onOpenAuth, onConfigUpdated }: AdminPanelProp
                 />
               </div>
               <div>
-                <label className="block text-xs font-medium text-zinc-700 mb-1">Precisão pesagem</label>
+                <label className="block text-xs font-medium text-zinc-700 mb-1">Alerta estoque baixo</label>
                 <input
                   type="number"
                   min={0}
-                  max={3}
-                  value={prodForm.precisao_pesagem}
-                  onChange={(e) => setProdForm({ ...prodForm, precisao_pesagem: e.target.value })}
+                  step="1"
+                  value={prodForm.estoque_baixo_limite}
+                  onChange={(e) => setProdForm({ ...prodForm, estoque_baixo_limite: e.target.value })}
                   className="w-full px-3 py-2 text-sm border border-zinc-300 rounded-lg font-mono-tabular"
                 />
               </div>
@@ -1014,17 +1018,10 @@ export function AdminPanel({ user, onOpenAuth, onConfigUpdated }: AdminPanelProp
                 />
               </div>
               <input
-                type="email"
-                required
-                placeholder="E-mail"
-                value={newClientForm.email}
-                onChange={(e) => setNewClientForm({ ...newClientForm, email: e.target.value })}
-                className="w-full px-3 py-2 text-sm border border-zinc-300 rounded-lg"
-              />
-              <input
                 type="password"
                 required
-                placeholder="Senha inicial forte"
+                minLength={6}
+                placeholder="Senha inicial (mín. 6 caracteres)"
                 value={newClientForm.senha}
                 onChange={(e) => setNewClientForm({ ...newClientForm, senha: e.target.value })}
                 className="w-full px-3 py-2 text-sm border border-zinc-300 rounded-lg"
@@ -1269,12 +1266,12 @@ export function AdminPanel({ user, onOpenAuth, onConfigUpdated }: AdminPanelProp
 
             <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
               <div>
-                <label className="block text-xs font-medium text-zinc-700 mb-1">Frete padrão único (R$)</label>
+                <label className="block text-xs font-medium text-zinc-700 mb-1">Frete fixo obrigatório (R$)</label>
                 <input
                   type="text"
-                  value={cfgForm.frete_reais}
-                  onChange={(e) => setCfgForm({ ...cfgForm, frete_reais: e.target.value })}
-                  className="w-full px-3 py-2 text-sm border border-zinc-300 rounded-lg font-mono-tabular"
+                  readOnly
+                  value="4.99"
+                  className="w-full px-3 py-2 text-sm bg-zinc-100 text-zinc-700 border border-zinc-300 rounded-lg font-mono-tabular cursor-not-allowed"
                 />
               </div>
               <div>

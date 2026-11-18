@@ -73,20 +73,8 @@ export function isValidEmail(email: string): boolean {
 
 export function validatePasswordStrength(password: string): { valid: boolean; errors: string[] } {
   const errors: string[] = [];
-  if (!password || password.length < 8) {
-    errors.push('A senha deve ter no mínimo 8 caracteres.');
-  }
-  if (!/[A-Z]/.test(password)) {
-    errors.push('A senha deve conter pelo menos uma letra maiúscula.');
-  }
-  if (!/[a-z]/.test(password)) {
-    errors.push('A senha deve conter pelo menos uma letra minúscula.');
-  }
-  if (!/[0-9]/.test(password)) {
-    errors.push('A senha deve conter pelo menos um número.');
-  }
-  if (!/[^A-Za-z0-9]/.test(password)) {
-    errors.push('A senha deve conter pelo menos um caractere especial.');
+  if (!password || password.length < 6) {
+    errors.push('A senha deve ter no mínimo 6 caracteres.');
   }
   return { valid: errors.length === 0, errors };
 }
