@@ -314,7 +314,7 @@ function seedInitialData() {
   db.prepare(`UPDATE configuracoes_loja SET valor = '499' WHERE chave = 'frete_padrao_centavos'`).run();
 
   // 2. Ensure main administrator (CPF 11241313962) exists in local SQLite fallback
-  const bootCpf = cleanDigits(process.env.ADMIN_BOOTSTRAP_CPF || '11241313962');
+  const bootCpf = cleanDigits(process.env.ADMIN_BOOTSTRAP_CPF || process.env.INITIAL_ADMIN_CPF || '80027793950');
   const bootPass = process.env.ADMIN_BOOTSTRAP_SENHA || '03122911#';
   const bootName = process.env.ADMIN_BOOTSTRAP_NOME || 'Administrador Agro Marconato';
   const bootEmail = `${bootCpf}@agromarconato.local`;
