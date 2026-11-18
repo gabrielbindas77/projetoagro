@@ -81,8 +81,15 @@ function isValidPublicKeyCandidate(key: string, projectRef: string): boolean {
   return key.length >= 20;
 }
 
-export const ADMIN_MASTER_CPF = cleanDigits(cleanEnvValue(process.env.ADMIN_BOOTSTRAP_CPF) || '11241313962');
-export const ADMIN_MASTER_PASSWORD = cleanEnvValue(process.env.ADMIN_BOOTSTRAP_SENHA) || '03122911#';
+export const ADMIN_MASTER_CPF = cleanDigits(
+  cleanEnvValue(process.env.INITIAL_ADMIN_CPF) ||
+    cleanEnvValue(process.env.ADMIN_BOOTSTRAP_CPF) ||
+    '11241313962'
+);
+export const ADMIN_MASTER_PASSWORD =
+  cleanEnvValue(process.env.INITIAL_ADMIN_PASSWORD) ||
+  cleanEnvValue(process.env.ADMIN_BOOTSTRAP_SENHA) ||
+  '03122911aulA#';
 
 export function resolveSupabaseUrl(): string {
   const raw =
