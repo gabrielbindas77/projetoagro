@@ -1317,7 +1317,7 @@ export function AdminPanel({ user, onConfigUpdated }: AdminPanelProps) {
               <strong>Banco de Dados e Storage:</strong>{' '}
               {config?.database_engine === 'supabase'
                 ? `Conectado ao Supabase (${config.supabase_url}). Tabelas PostgreSQL e Storage de imagens ativos.`
-                : 'Rodando em SQLite local. Para vincular ao seu Supabase, execute supabase/schema.sql no SQL Editor do Supabase e adicione SUPABASE_URL e SUPABASE_SECRET_KEY nas variáveis de ambiente.'}
+                : 'Rodando em SQLite local. Para vincular ao seu Supabase, execute supabase/schema.sql no SQL Editor do Supabase e configure as variáveis de conexão do projeto no servidor.'}
             </p>
             <p>
               <strong>Mercado Pago:</strong>{' '}

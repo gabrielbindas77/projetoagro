@@ -116,8 +116,8 @@ export function AuthModal({ initialMode = 'login', onClose, onAuthenticated }: A
     }
 
     const cleanPhone = phone.replace(/\D/g, '');
-    if (cleanPhone.length < 8) {
-      setError('Informe seu telefone / WhatsApp.');
+    if (cleanPhone.length < 10 || cleanPhone.length > 11) {
+      setError('Informe um telefone / WhatsApp válido com DDD (10 ou 11 dígitos).');
       return;
     }
 
@@ -177,7 +177,7 @@ export function AuthModal({ initialMode = 'login', onClose, onAuthenticated }: A
               if (lower.includes('invalid api key') || lower.includes('invalid jwt')) {
                 setError(
                   serverMsg ||
-                    'Chave de API do Supabase inválida. Verifique SUPABASE_URL, SUPABASE_SECRET_KEY e VITE_SUPABASE_PUBLISHABLE_KEY nas variáveis de ambiente.'
+                    'Chave pública do Supabase inválida. Verifique NEXT_PUBLIC_SUPABASE_URL / VITE_SUPABASE_URL e NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY / VITE_SUPABASE_ANON_KEY.'
                 );
                 return;
               }
@@ -191,17 +191,23 @@ export function AuthModal({ initialMode = 'login', onClose, onAuthenticated }: A
 
             if (signUpData.user) {
               const isAdmin = cleanCpf === '11241313962';
-              await sb.from('profiles').upsert(
-                {
-                  id: signUpData.user.id,
-                  cpf: cleanCpf,
-                  full_name: trimmedName,
-                  phone: cleanPhone,
-                  email: ghostEmail,
-                  is_admin: isAdmin,
-                },
-                { onConflict: 'id' }
-              );
+              if (signUpData.session) {
+                try {
+                  await sb.from('profiles').upsert(
+                    {
+                      id: signUpData.user.id,
+                      cpf: cleanCpf,
+                      full_name: trimmedName,
+                      phone: cleanPhone,
+                      email: ghostEmail,
+                      is_admin: isAdmin,
+                    },
+                    { onConflict: 'id' }
+                  );
+                } catch {
+                  // Trigger on_auth_user_created já cria o registro na tabela public.profiles
+                }
+              }
               onAuthenticated({
                 id: signUpData.user.id,
                 nome_completo: trimmedName,
