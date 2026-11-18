@@ -1,4 +1,5 @@
 import crypto from 'crypto';
+import fs from 'fs';
 import path from 'path';
 import express from 'express';
 import multer from 'multer';
@@ -76,7 +77,14 @@ import { broadcastChatMessage, broadcastOrderUpdate } from './ws.ts';
 export const apiRouter = express.Router();
 
 const storage = multer.diskStorage({
-  destination: (_req, _file, cb) => cb(null, uploadsDir),
+  destination: (_req, _file, cb) => {
+    try {
+      if (!fs.existsSync(uploadsDir)) fs.mkdirSync(uploadsDir, { recursive: true });
+    } catch {
+      // ignore
+    }
+    cb(null, uploadsDir);
+  },
   filename: (_req, file, cb) => {
     const ext = path.extname(file.originalname).toLowerCase() || '.jpg';
     cb(null, `${crypto.randomUUID()}${ext}`);

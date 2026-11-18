@@ -1,29 +1,51 @@
-import Database from 'better-sqlite3';
+import { createRequire } from 'module';
+import type BetterSqlite3 from 'better-sqlite3';
 import bcrypt from 'bcryptjs';
 import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
 import { cleanDigits, normalizeText } from './utils.ts';
 
+const require = createRequire(import.meta.url);
+
 const baseWritableDir = process.env.VERCEL ? '/tmp/agro-marconato' : process.cwd();
 const dataDir = path.resolve(baseWritableDir, 'data');
-if (!fs.existsSync(dataDir)) {
-  fs.mkdirSync(dataDir, { recursive: true });
-}
 
 export const uploadsDir = path.resolve(baseWritableDir, 'uploads', 'produtos');
-if (!fs.existsSync(uploadsDir)) {
-  fs.mkdirSync(uploadsDir, { recursive: true });
+try {
+  if (!fs.existsSync(uploadsDir)) {
+    fs.mkdirSync(uploadsDir, { recursive: true });
+  }
+} catch {
+  // Ignore if running in strictly read-only environment without local disk
 }
 
-const dbPath = path.join(dataDir, 'agro_marconato.db');
-export const db = new Database(dbPath);
+let sqliteInstance: BetterSqlite3.Database | null = null;
 
-db.pragma('journal_mode = WAL');
-db.pragma('foreign_keys = ON');
+export function getSqliteDb(): BetterSqlite3.Database {
+  if (!sqliteInstance) {
+    if (!fs.existsSync(dataDir)) {
+      fs.mkdirSync(dataDir, { recursive: true });
+    }
+    const Database = require('better-sqlite3') as typeof BetterSqlite3;
+    const dbPath = path.join(dataDir, 'agro_marconato.db');
+    sqliteInstance = new Database(dbPath);
+    sqliteInstance.pragma('journal_mode = WAL');
+    sqliteInstance.pragma('foreign_keys = ON');
+  }
+  return sqliteInstance;
+}
+
+export const db: BetterSqlite3.Database = new Proxy({} as BetterSqlite3.Database, {
+  get(_target, prop) {
+    const instance = getSqliteDb() as any;
+    const value = instance[prop];
+    return typeof value === 'function' ? value.bind(instance) : value;
+  },
+});
 
 export function initDatabase() {
-  db.exec(`
+  getSqliteDb().exec(`
     CREATE TABLE IF NOT EXISTS clientes (
       id TEXT PRIMARY KEY,
       nome_completo TEXT NOT NULL,

@@ -1,7 +1,13 @@
 import { useState, type FormEvent } from 'react';
 import { X, AlertCircle, Lock, CheckCircle2, Loader2, Phone } from 'lucide-react';
 import { apiFetch, ApiError, setAuthToken } from '../lib/api.ts';
-import { maskCPF, maskPhone, validateCPFClient } from '../lib/format.ts';
+import {
+  isValidBrazilPhoneClient,
+  maskCPF,
+  maskPhone,
+  normalizeBrazilPhoneClient,
+  validateCPFClient,
+} from '../lib/format.ts';
 import { cpfToInternalEmail, getSupabaseBrowserClient, isFrontendSupabaseConfigured } from '../lib/supabase.ts';
 import type { User } from '../types.ts';
 
@@ -53,9 +59,9 @@ export function AuthModal({ initialMode = 'login', onClose, onAuthenticated }: A
   }
 
   async function verifyPhoneViaApi(rawPhone: string): Promise<{ ok: boolean; normalized: string; message?: string }> {
-    const cleanPhone = rawPhone.replace(/\D/g, '');
-    if (cleanPhone.length < 10) {
-      const msg = 'Informe um telefone/WhatsApp válido com DDD (10 ou 11 dígitos).';
+    const cleanPhone = normalizeBrazilPhoneClient(rawPhone);
+    if (!isValidBrazilPhoneClient(cleanPhone)) {
+      const msg = 'Número de telefone/WhatsApp inválido. Informe DDD válido + 9 dígitos para celular.';
       setPhoneCheckState({ status: 'invalid', message: msg });
       return { ok: false, normalized: cleanPhone, message: msg };
     }
@@ -78,19 +84,17 @@ export function AuthModal({ initialMode = 'login', onClose, onAuthenticated }: A
       });
       return { ok: true, normalized: res.normalized, message: res.message };
     } catch (err: any) {
-      if (err instanceof ApiError && err.status !== 404) {
+      // Somente bloqueia se a API explicitamente rejeitar o número (400 / 422)
+      if (err instanceof ApiError && (err.status === 400 || err.status === 422)) {
         setPhoneCheckState({ status: 'invalid', message: err.message });
         return { ok: false, normalized: cleanPhone, message: err.message };
       }
-      // Local DDD + 9-digit fallback only if API route is unavailable
-      const ddd = cleanPhone.slice(0, 2);
-      const validSyntax = cleanPhone.length === 10 || (cleanPhone.length === 11 && cleanPhone[2] === '9');
-      if (!validSyntax || ddd === '00') {
-        const msg = 'Número de telefone/WhatsApp inválido.';
-        setPhoneCheckState({ status: 'invalid', message: msg });
-        return { ok: false, normalized: cleanPhone, message: msg };
-      }
-      setPhoneCheckState({ status: 'valid', message: 'Formato de WhatsApp válido.', normalized: cleanPhone });
+      // Se o endpoint retornar 404/5xx, mantém a validação ANATEL local aprovada
+      setPhoneCheckState({
+        status: 'valid',
+        message: 'DDD e formato de WhatsApp/telefone verificados.',
+        normalized: cleanPhone,
+      });
       return { ok: true, normalized: cleanPhone };
     }
   }
@@ -117,7 +121,7 @@ export function AuthModal({ initialMode = 'login', onClose, onAuthenticated }: A
       onAuthenticated(data.user);
       onClose();
     } catch (err: any) {
-      if (err instanceof ApiError && err.status === 404 && isFrontendSupabaseConfigured()) {
+      if (err instanceof ApiError && (err.status === 404 || err.status >= 500) && isFrontendSupabaseConfigured()) {
         const sb = getSupabaseBrowserClient();
         if (sb) {
           const cleanCpf = cpf.replace(/\D/g, '');
@@ -203,8 +207,8 @@ export function AuthModal({ initialMode = 'login', onClose, onAuthenticated }: A
       onAuthenticated(data.user);
       onClose();
     } catch (err: any) {
-      // Fallback direto via Supabase caso o servidor /api esteja indisponível (404)
-      if (err instanceof ApiError && err.status === 404 && isFrontendSupabaseConfigured()) {
+      // Fallback direto via Supabase caso o servidor /api esteja indisponível (404/5xx)
+      if (err instanceof ApiError && (err.status === 404 || err.status >= 500) && isFrontendSupabaseConfigured()) {
         try {
           const sb = getSupabaseBrowserClient();
           if (sb) {
