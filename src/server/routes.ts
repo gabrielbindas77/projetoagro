@@ -61,6 +61,10 @@ import {
   updateCartItemRepo,
   updateOrderDeliveryStatusRepo,
   createAdminRepo,
+  updateClienteAdminRepo,
+  deleteClienteAdminRepo,
+  updateAdminAdminRepo,
+  deleteAdminAdminRepo,
 } from './store-repo-orders.ts';
 import {
   cleanDigits,
@@ -1032,6 +1036,42 @@ apiRouter.post('/admin/administradores', requireAdmin, async (req: AuthRequest, 
     res.status(201).json(created);
   } catch (err: any) {
     res.status(409).json({ error: err?.message || 'CPF ou e-mail já cadastrado.' });
+  }
+});
+
+apiRouter.patch('/admin/clientes/:id', requireAdmin, async (req, res) => {
+  try {
+    await updateClienteAdminRepo(req.params.id, req.body || {});
+    res.json({ ok: true });
+  } catch (err: any) {
+    res.status(400).json({ error: err?.message || 'Erro ao atualizar cliente.' });
+  }
+});
+
+apiRouter.delete('/admin/clientes/:id', requireAdmin, async (req, res) => {
+  try {
+    await deleteClienteAdminRepo(req.params.id);
+    res.json({ ok: true });
+  } catch (err: any) {
+    res.status(400).json({ error: err?.message || 'Erro ao excluir cliente.' });
+  }
+});
+
+apiRouter.patch('/admin/administradores/:id', requireAdmin, async (req: AuthRequest, res) => {
+  try {
+    await updateAdminAdminRepo(req.params.id, req.user!.id, req.body || {});
+    res.json({ ok: true });
+  } catch (err: any) {
+    res.status(400).json({ error: err?.message || 'Erro ao atualizar administrador.' });
+  }
+});
+
+apiRouter.delete('/admin/administradores/:id', requireAdmin, async (req: AuthRequest, res) => {
+  try {
+    await deleteAdminAdminRepo(req.params.id, req.user!.id);
+    res.json({ ok: true });
+  } catch (err: any) {
+    res.status(400).json({ error: err?.message || 'Erro ao excluir administrador.' });
   }
 });
 

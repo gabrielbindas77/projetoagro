@@ -30,7 +30,7 @@ function cleanEnvValue(raw?: string): string {
   return val;
 }
 
-function extractProjectRefFromUrl(url: string): string {
+export function extractProjectRefFromUrl(url: string): string {
   try {
     const parsed = new URL(url);
     const host = parsed.hostname.toLowerCase();

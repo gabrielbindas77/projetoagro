@@ -183,6 +183,9 @@ export function CartDrawer({
               <span>Frete fixo obrigatório</span>
               <span className="font-mono-tabular">{formatBRL(shippingCentavos)}</span>
             </div>
+            <div className="text-xs font-semibold text-[#143824] bg-[#e9f2ec] px-2.5 py-1 rounded">
+              Frete fixo de R$ 4,99.
+            </div>
             <div className="pt-2 border-t border-zinc-200 flex items-center justify-between text-base font-bold text-zinc-900">
               <span>Total</span>
               <span className="font-mono-tabular text-[#143824]">{formatBRL(totalCentavos)}</span>

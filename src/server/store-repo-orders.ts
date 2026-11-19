@@ -1,8 +1,9 @@
 import crypto from 'crypto';
 import bcrypt from 'bcryptjs';
 import { db } from './db.ts';
-import { getSupabaseAdmin } from './supabase.ts';
+import { ADMIN_MASTER_CPF, getSupabaseAdmin } from './supabase.ts';
 import { getConfigMap, getOrCreateCart, getProdutoById, registerUserByCpfPassword } from './store-repo.ts';
+import { cleanDigits } from './utils.ts';
 
 function boolNum(val: any): number {
   return val === true || val === 1 ? 1 : 0;
@@ -1074,6 +1075,148 @@ export async function createAdminRepo(input: {
     VALUES (?, ?, ?, ?, ?, ?, 'ADMIN', ?)
   `).run(id, input.nome_completo, input.cpf, input.email, input.telefone, hash, input.criado_por);
   return { id, nome_completo: input.nome_completo, cpf: input.cpf, email: input.email, telefone: input.telefone };
+}
+
+export async function updateClienteAdminRepo(clienteId: string, data: { nome_completo?: string; telefone?: string; email?: string }) {
+  const sb = getSupabaseAdmin();
+  if (sb) {
+    const { data: prof } = await sb.from('profiles').select('is_admin').eq('id', clienteId).maybeSingle();
+    if (!prof) throw new Error('Cliente não encontrado.');
+    if (prof.is_admin) throw new Error('Não é permitido alterar administradores por esta rota.');
+
+    const updatePayload: any = {};
+    if (data.nome_completo) updatePayload.full_name = String(data.nome_completo).trim();
+    if (data.telefone) updatePayload.phone = cleanDigits(data.telefone);
+    if (data.email) updatePayload.email = String(data.email).trim().toLowerCase();
+    updatePayload.updated_at = new Date().toISOString();
+
+    const { error } = await sb.from('profiles').update(updatePayload).eq('id', clienteId);
+    if (error) throw new Error(error.message);
+    return { ok: true };
+  }
+
+  const cli = db.prepare(`SELECT id FROM clientes WHERE id = ?`).get(clienteId);
+  if (!cli) throw new Error('Cliente não encontrado.');
+  const fields: string[] = [];
+  const vals: any[] = [];
+  if (data.nome_completo) {
+    fields.push('nome_completo = ?');
+    vals.push(String(data.nome_completo).trim());
+  }
+  if (data.telefone) {
+    fields.push('telefone = ?');
+    vals.push(cleanDigits(data.telefone));
+  }
+  if (data.email) {
+    fields.push('email = ?');
+    vals.push(String(data.email).trim().toLowerCase());
+  }
+  if (fields.length > 0) {
+    vals.push(clienteId);
+    db.prepare(`UPDATE clientes SET ${fields.join(', ')}, atualizado_em = datetime('now') WHERE id = ?`).run(...vals);
+  }
+  return { ok: true };
+}
+
+export async function deleteClienteAdminRepo(clienteId: string) {
+  const sb = getSupabaseAdmin();
+  if (sb) {
+    const { data: prof } = await sb.from('profiles').select('cpf, is_admin').eq('id', clienteId).maybeSingle();
+    if (!prof) throw new Error('Cliente não encontrado.');
+    if (prof.is_admin || prof.cpf === ADMIN_MASTER_CPF) {
+      throw new Error('Não é permitido excluir o administrador principal ou contas administrativas.');
+    }
+    const { error } = await sb.auth.admin.deleteUser(clienteId);
+    if (error) {
+      await sb.from('profiles').delete().eq('id', clienteId);
+    }
+    return { ok: true };
+  }
+
+  const cli = db.prepare(`SELECT cpf FROM clientes WHERE id = ?`).get(clienteId) as any;
+  if (!cli) throw new Error('Cliente não encontrado.');
+  if (cli.cpf === ADMIN_MASTER_CPF) throw new Error('Não é permitido excluir o administrador principal.');
+  db.prepare(`DELETE FROM clientes WHERE id = ?`).run(clienteId);
+  return { ok: true };
+}
+
+export async function updateAdminAdminRepo(
+  adminId: string,
+  operatorId: string,
+  data: { nome_completo?: string; email?: string; telefone?: string; ativo?: boolean; is_admin?: boolean }
+) {
+  const sb = getSupabaseAdmin();
+  if (sb) {
+    const { data: prof } = await sb.from('profiles').select('cpf, is_admin').eq('id', adminId).maybeSingle();
+    if (!prof) throw new Error('Administrador não encontrado.');
+
+    if (prof.cpf === ADMIN_MASTER_CPF) {
+      if (data.is_admin === false || data.ativo === false) {
+        throw new Error('O administrador principal não pode ser desativado ou rebaixado.');
+      }
+    }
+
+    if (adminId === operatorId && (data.is_admin === false || data.ativo === false)) {
+      throw new Error('Você não pode desativar ou rebaixar a si mesmo.');
+    }
+
+    const updatePayload: any = {};
+    if (data.nome_completo) updatePayload.full_name = String(data.nome_completo).trim();
+    if (data.email) updatePayload.email = String(data.email).trim().toLowerCase();
+    if (data.telefone) updatePayload.phone = cleanDigits(data.telefone);
+    if (data.is_admin !== undefined && prof.cpf !== ADMIN_MASTER_CPF) {
+      updatePayload.is_admin = Boolean(data.is_admin);
+    }
+    updatePayload.updated_at = new Date().toISOString();
+
+    const { error } = await sb.from('profiles').update(updatePayload).eq('id', adminId);
+    if (error) throw new Error(error.message);
+    return { ok: true };
+  }
+
+  const adm = db.prepare(`SELECT cpf FROM administradores WHERE id = ?`).get(adminId) as any;
+  if (!adm) throw new Error('Administrador não encontrado.');
+  if (adm.cpf === ADMIN_MASTER_CPF && data.ativo === false) {
+    throw new Error('O administrador principal não pode ser desativado.');
+  }
+  if (adminId === operatorId && data.ativo === false) {
+    throw new Error('Você não pode desativar a si mesmo.');
+  }
+  db.prepare(`UPDATE administradores SET nome_completo = COALESCE(?, nome_completo), email = COALESCE(?, email), telefone = COALESCE(?, telefone), ativo = COALESCE(?, ativo) WHERE id = ?`).run(
+    data.nome_completo || null,
+    data.email || null,
+    data.telefone || null,
+    data.ativo !== undefined ? (data.ativo ? 1 : 0) : null,
+    adminId
+  );
+  return { ok: true };
+}
+
+export async function deleteAdminAdminRepo(adminId: string, operatorId: string) {
+  if (adminId === operatorId) {
+    throw new Error('Você não pode excluir sua própria conta administrativa.');
+  }
+  const sb = getSupabaseAdmin();
+  if (sb) {
+    const { data: prof } = await sb.from('profiles').select('cpf').eq('id', adminId).maybeSingle();
+    if (!prof) throw new Error('Administrador não encontrado.');
+    if (prof.cpf === ADMIN_MASTER_CPF) {
+      throw new Error('O administrador principal não pode ser excluído.');
+    }
+    const { error } = await sb.auth.admin.deleteUser(adminId);
+    if (error) {
+      await sb.from('profiles').delete().eq('id', adminId);
+    }
+    return { ok: true };
+  }
+
+  const adm = db.prepare(`SELECT cpf FROM administradores WHERE id = ?`).get(adminId) as any;
+  if (!adm) throw new Error('Administrador não encontrado.');
+  if (adm.cpf === ADMIN_MASTER_CPF) {
+    throw new Error('O administrador principal não pode ser excluído.');
+  }
+  db.prepare(`DELETE FROM administradores WHERE id = ?`).run(adminId);
+  return { ok: true };
 }
 
 export async function listConversationsRepo(user: { id: string; papel: 'ADMIN' | 'CLIENTE' }) {

@@ -7,6 +7,7 @@ import {
   ADMIN_MASTER_CPF,
   cpfToAuthEmail,
   ensureSupabaseAdminBootstrap,
+  extractProjectRefFromUrl,
   getSupabaseAdmin,
   isInvalidApiKeyMessage,
   isSupabaseConfigured,
@@ -250,6 +251,7 @@ export async function registerUserByCpfPassword(input: {
 
     const userId = createdRes.data.user.id;
     sb = getSupabaseAdmin()!;
+    await sb.from('profiles').delete().eq('cpf', cpf).neq('id', userId);
     const { data: profile, error: profErr } = await sb
       .from('profiles')
       .upsert(
@@ -327,6 +329,7 @@ export async function authenticateUserByCpfPassword(cpfRaw: string, senha: strin
 
     if (!profile) {
       const isAdmin = cpf === ADMIN_MASTER_CPF;
+      await sb.from('profiles').delete().eq('cpf', cpf).neq('id', userId);
       const { data: inserted } = await sb
         .from('profiles')
         .upsert(
@@ -1067,7 +1070,14 @@ export async function getCartPayload(clienteId: string) {
 
 export async function ensureProfileExists(clienteId: string) {
   const sb = getSupabaseAdmin();
-  if (!sb) return;
+  if (!sb) {
+    console.warn('[DIAGNOSTICO CART] Supabase admin client não configurado ao verificar perfil para ID:', clienteId);
+    return;
+  }
+
+  const projectUrl = resolveSupabaseUrl();
+  const projectRef = extractProjectRefFromUrl(projectUrl);
+  console.info(`[DIAGNOSTICO CART] Verificando perfil | ProjectRef: ${projectRef || 'desconhecido'} | ClienteId (UUID): ${clienteId}`);
 
   // 1. Check if profile exists
   const { data: prof, error: profErr } = await sb
@@ -1077,8 +1087,11 @@ export async function ensureProfileExists(clienteId: string) {
     .maybeSingle();
 
   if (profErr) {
+    console.error(`[DIAGNOSTICO CART] Erro ao consultar profiles para ID ${clienteId}:`, profErr.message);
     throw new Error(`Erro ao consultar perfil no Supabase: ${profErr.message}`);
   }
+
+  console.info(`[DIAGNOSTICO CART] Consulta profiles concluída para ID ${clienteId}. Encontrado:`, Boolean(prof));
 
   if (prof) {
     return; // Profile exists
@@ -1087,6 +1100,7 @@ export async function ensureProfileExists(clienteId: string) {
   // 2. Fetch user from Supabase Auth
   const { data: authUserRes, error: authErr } = await sb.auth.admin.getUserById(clienteId);
   if (authErr || !authUserRes?.user) {
+    console.error(`[DIAGNOSTICO CART] Usuário não encontrado no Supabase Auth para ID ${clienteId}:`, authErr?.message);
     throw new Error(`Usuário não encontrado no Supabase Auth (${clienteId}): ${authErr?.message || 'usuário inexistente'}`);
   }
 
@@ -1095,6 +1109,7 @@ export async function ensureProfileExists(clienteId: string) {
   const cpf = cleanDigits(rawCpf);
 
   if (!cpf || cpf.length !== 11 || cpf === '00000000000') {
+    console.error(`[DIAGNOSTICO CART] CPF inválido ou ausente para ID ${clienteId}`);
     throw new Error('CPF válido não encontrado nos metadados do usuário ou e-mail de autenticação.');
   }
 
@@ -1102,6 +1117,11 @@ export async function ensureProfileExists(clienteId: string) {
   const email = authUser.email || `${cpf}@agromarconato.local`;
   const phone = cleanDigits(authUser.user_metadata?.phone || '');
   const isAdmin = cpf === ADMIN_MASTER_CPF;
+
+  console.info(`[DIAGNOSTICO CART] Criando/atualizando perfil em public.profiles para ID ${clienteId} (admin: ${isAdmin})`);
+
+  // 2.5 Clean up any stale profile with same cpf to avoid unique constraint violation on cpf
+  await sb.from('profiles').delete().eq('cpf', cpf).neq('id', clienteId);
 
   // 3. Upsert profile with proper error propagation
   const { error: upsertErr } = await sb.from('profiles').upsert(
@@ -1117,13 +1137,20 @@ export async function ensureProfileExists(clienteId: string) {
   );
 
   if (upsertErr) {
+    console.error(`[DIAGNOSTICO CART] Erro no upsert de profiles para ID ${clienteId}:`, upsertErr.message);
     throw new Error(`Erro ao criar/atualizar perfil do usuário: ${upsertErr.message}`);
   }
+
+  console.info(`[DIAGNOSTICO CART] Perfil criado/atualizado com sucesso em public.profiles para ID ${clienteId}`);
 }
 
 export async function getOrCreateCart(clienteId: string): Promise<string> {
   const sb = getSupabaseAdmin();
   if (sb) {
+    if (!clienteId) {
+      throw new Error('Identificador do cliente (clienteId) inválido ou ausente.');
+    }
+
     // Ensure profile exists co-dependently; throws error if profile cannot be verified or created
     await ensureProfileExists(clienteId);
 
@@ -1135,17 +1162,28 @@ export async function getOrCreateCart(clienteId: string): Promise<string> {
       .maybeSingle();
 
     if (profileCheckErr || !profileCheck) {
+      console.error(`[DIAGNOSTICO CART] Falha na validação final do perfil para ID ${clienteId}:`, profileCheckErr?.message);
       throw new Error('Não é possível criar o carrinho: perfil do cliente não encontrado.');
     }
 
     const { data: existing, error: existingErr } = await sb.from('carrinhos').select('id').eq('cliente_id', clienteId).maybeSingle();
     if (existingErr) {
+      console.error(`[DIAGNOSTICO CART] Erro ao buscar carrinho para ID ${clienteId}:`, existingErr.message);
       throw new Error(`Erro ao buscar carrinho: ${existingErr.message}`);
     }
-    if (existing) return existing.id;
+    if (existing) {
+      console.info(`[DIAGNOSTICO CART] Carrinho existente encontrado para ID ${clienteId}:`, existing.id);
+      return existing.id;
+    }
 
+    console.info(`[DIAGNOSTICO CART] Inserindo novo registro em public.carrinhos com cliente_id (UUID):`, clienteId);
     const { data, error } = await sb.from('carrinhos').insert({ cliente_id: clienteId }).select('id').single();
-    if (error) throw new Error(`Erro ao criar carrinho: ${error.message}`);
+    if (error) {
+      console.error(`[DIAGNOSTICO CART] ERRO CRÍTICO insert carrinhos para cliente_id ${clienteId}:`, error.message);
+      throw new Error(`Erro ao criar carrinho: ${error.message}`);
+    }
+
+    console.info(`[DIAGNOSTICO CART] Carrinho criado com sucesso para cliente_id ${clienteId}. CartId:`, data.id);
     return data.id;
   }
 

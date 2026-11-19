@@ -421,15 +421,11 @@ export default function App() {
               <section className="border-b border-zinc-200 bg-[#FAFBF9]">
                 <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-10 lg:py-14 grid grid-cols-1 lg:grid-cols-12 gap-8 items-stretch">
                   <div className="lg:col-span-6 flex flex-col justify-center space-y-5">
-                    <p className="text-xs font-semibold uppercase tracking-widest text-[#143824]">
-                      Agro Marconato Agropecuária
-                    </p>
                     <h1 className="text-3xl sm:text-4xl lg:text-5xl font-bold text-zinc-900 tracking-tight leading-[1.12] [text-wrap:balance]">
                       Nutrição animal, sementes e insumos com precisão do campo à sua casa.
                     </h1>
                     <p className="text-base text-zinc-600 leading-relaxed max-w-xl">
-                      Compre por unidade ou por quilo exato (aceita frações como 0,5 kg ou 1,5 kg).
-                      Frete fixo único de {formatBRL(config.frete_padrao_centavos)} e pagamento via PIX, cartão à vista ou na entrega.
+                      Frete fixo de R$ 4,99. Pagamento via PIX, cartão à vista ou na entrega.
                     </p>
                     <div className="flex flex-wrap items-center gap-4 pt-1">
                       <a
@@ -627,7 +623,7 @@ export default function App() {
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-10 flex flex-col md:flex-row items-start md:items-center justify-between gap-6">
           <div>
             <div className="text-base font-bold text-[#143824] font-display">
-              Agro Marconato Agropecuária
+              Loja Oficial
             </div>
             <p className="text-xs text-zinc-500 mt-1">
               Rações, sementes, produtos veterinários e ferramentas para sua propriedade.
@@ -652,7 +648,7 @@ export default function App() {
                 Gestão da Loja
               </button>
             )}
-            <span className="text-zinc-400">© {new Date().getFullYear()} Agro Marconato</span>
+            <span className="text-zinc-400">© {new Date().getFullYear()} Loja Oficial</span>
           </div>
         </div>
       </footer>
