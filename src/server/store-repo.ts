@@ -1065,15 +1065,90 @@ export async function getCartPayload(clienteId: string) {
   };
 }
 
+export async function ensureProfileExists(clienteId: string) {
+  const sb = getSupabaseAdmin();
+  if (!sb) return;
+
+  // 1. Check if profile exists
+  const { data: prof, error: profErr } = await sb
+    .from('profiles')
+    .select('id, cpf, is_admin')
+    .eq('id', clienteId)
+    .maybeSingle();
+
+  if (profErr) {
+    throw new Error(`Erro ao consultar perfil no Supabase: ${profErr.message}`);
+  }
+
+  if (prof) {
+    return; // Profile exists
+  }
+
+  // 2. Fetch user from Supabase Auth
+  const { data: authUserRes, error: authErr } = await sb.auth.admin.getUserById(clienteId);
+  if (authErr || !authUserRes?.user) {
+    throw new Error(`Usuário não encontrado no Supabase Auth (${clienteId}): ${authErr?.message || 'usuário inexistente'}`);
+  }
+
+  const authUser = authUserRes.user;
+  const rawCpf = authUser.user_metadata?.cpf || authUser.email?.split('@')[0] || '';
+  const cpf = cleanDigits(rawCpf);
+
+  if (!cpf || cpf.length !== 11 || cpf === '00000000000') {
+    throw new Error('CPF válido não encontrado nos metadados do usuário ou e-mail de autenticação.');
+  }
+
+  const fullName = String(authUser.user_metadata?.full_name || '').trim() || `Cliente ${cpf.slice(-4)}`;
+  const email = authUser.email || `${cpf}@agromarconato.local`;
+  const phone = cleanDigits(authUser.user_metadata?.phone || '');
+  const isAdmin = cpf === ADMIN_MASTER_CPF;
+
+  // 3. Upsert profile with proper error propagation
+  const { error: upsertErr } = await sb.from('profiles').upsert(
+    {
+      id: clienteId,
+      cpf,
+      full_name: fullName,
+      phone,
+      email,
+      is_admin: isAdmin,
+    },
+    { onConflict: 'id' }
+  );
+
+  if (upsertErr) {
+    throw new Error(`Erro ao criar/atualizar perfil do usuário: ${upsertErr.message}`);
+  }
+}
+
 export async function getOrCreateCart(clienteId: string): Promise<string> {
   const sb = getSupabaseAdmin();
   if (sb) {
-    const { data: existing } = await sb.from('carrinhos').select('id').eq('cliente_id', clienteId).maybeSingle();
+    // Ensure profile exists co-dependently; throws error if profile cannot be verified or created
+    await ensureProfileExists(clienteId);
+
+    // Double check profile exists before inserting into carrinhos
+    const { data: profileCheck, error: profileCheckErr } = await sb
+      .from('profiles')
+      .select('id')
+      .eq('id', clienteId)
+      .maybeSingle();
+
+    if (profileCheckErr || !profileCheck) {
+      throw new Error('Não é possível criar o carrinho: perfil do cliente não encontrado.');
+    }
+
+    const { data: existing, error: existingErr } = await sb.from('carrinhos').select('id').eq('cliente_id', clienteId).maybeSingle();
+    if (existingErr) {
+      throw new Error(`Erro ao buscar carrinho: ${existingErr.message}`);
+    }
     if (existing) return existing.id;
+
     const { data, error } = await sb.from('carrinhos').insert({ cliente_id: clienteId }).select('id').single();
-    if (error) throw new Error(error.message);
+    if (error) throw new Error(`Erro ao criar carrinho: ${error.message}`);
     return data.id;
   }
+
   const existing = db.prepare(`SELECT id FROM carrinhos WHERE cliente_id = ?`).get(clienteId) as { id: string } | undefined;
   if (existing) return existing.id;
   const id = crypto.randomUUID();

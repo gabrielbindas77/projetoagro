@@ -15,7 +15,10 @@ export async function ensureBackendInitialized() {
   if (initialized) return;
   if (!initPromise) {
     initPromise = (async () => {
-      if (!isSupabaseConfigured() || !process.env.VERCEL) {
+      if (process.env.VERCEL && !isSupabaseConfigured()) {
+        throw new Error('CONFIGURAÇÃO OBRIGATÓRIA DO SUPABASE AUSENTE: Na Vercel, SUPABASE_URL e SUPABASE_SECRET_KEY / SUPABASE_SERVICE_ROLE_KEY devem estar configuradas.');
+      }
+      if (!isSupabaseConfigured()) {
         initDatabase();
       }
       if (isSupabaseConfigured()) {
